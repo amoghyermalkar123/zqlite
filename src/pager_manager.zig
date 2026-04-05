@@ -53,16 +53,16 @@ test "load_page" {
     defer std.fs.cwd().deleteFile("data.bin") catch {};
 
     var full_page = [_]u8{0} ** 4096;
-    full_page[0] = 0x00; // page type: Leaf
-    full_page[1] = 0x00;
-    full_page[2] = 0x00; // first free block
-    full_page[3] = 0x00;
-    full_page[4] = 0x01; // cell count = 1
-    full_page[5] = 0x00;
-    full_page[6] = 0x74; // cell content offset = 116
-    full_page[7] = 0x00; // fragmented bytes count
-    full_page[8] = 0x00;
-    full_page[9] = 0x74; // one cell pointer -> byte offset 116
+    full_page[100] = 0x0D; // page type: SQLite table leaf page
+    full_page[101] = 0x00;
+    full_page[102] = 0x00; // first free block
+    full_page[103] = 0x00;
+    full_page[104] = 0x01; // cell count = 1
+    full_page[105] = 0x00;
+    full_page[106] = 0x74; // cell content offset = 116
+    full_page[107] = 0x00; // fragmented bytes count
+    full_page[108] = 0x00;
+    full_page[109] = 0x74; // one cell pointer -> absolute byte offset 116 in page 1
 
     full_page[116] = 0x05; // varint: payload size = 5
     full_page[117] = 0x01; // varint: row_id = 1
@@ -82,4 +82,7 @@ test "load_page" {
 
     const page = try load_page(&pm, fba.allocator(), 1);
     try t.expectEqual(Page.PageType.Leaf, page.Leaf.header.page_type);
+    try t.expectEqual(@as(u16, 1), page.Leaf.header.cell_count);
+    try t.expectEqual(@as(usize, 1), page.Leaf.cells.items.len);
+    try t.expectEqual(@as(i64, 1), page.Leaf.cells.items[0].row_id);
 }

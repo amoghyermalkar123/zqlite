@@ -36,7 +36,7 @@ pub const TableLeafCell = struct {
 };
 
 pub const PageType = enum(u8) {
-    Leaf = 0x00,
+    Leaf = 0x0D,
 };
 
 const Decoder = struct {
@@ -65,21 +65,19 @@ const Decoder = struct {
 };
 
 pub fn parse_page(alloc: Allocator, buffer: []const u8, page_num: usize) !Page {
-    // if 1st page read from 100 for actual page content and skip metadata
-    // NOTE: pages are 1-based
-    const ptr_offset = if (page_num == 1) @as(u16, cnst.HEADER_SIZE) else 0;
-    const pt: PageType = @enumFromInt(buffer[0]);
+    const page_offset = if (page_num == 1) cnst.HEADER_SIZE else 0;
+    const pt: PageType = @enumFromInt(buffer[page_offset]);
 
     if (pt != .Leaf) return error.UnknownPageType;
 
     var decoder = Decoder{ .buffer = buffer };
-    return parse_table_leaf_page(alloc, &decoder, ptr_offset);
+    return parse_table_leaf_page(alloc, &decoder, page_offset);
 }
 
-fn parse_table_leaf_page(alloc: Allocator, decoder: *Decoder, ptr_offset: u16) !Page {
-    const pg_hdr = try parse_page_header(decoder);
+fn parse_table_leaf_page(alloc: Allocator, decoder: *Decoder, page_offset: usize) !Page {
+    const pg_hdr = try parse_page_header(decoder, page_offset);
     // parse cell pointers
-    const cell_pointers = try parse_cell_pointers(alloc, decoder, pg_hdr.cell_count, ptr_offset);
+    const cell_pointers = try parse_cell_pointers(alloc, decoder, page_offset, pg_hdr.cell_count);
     // parse cells
     var cells = try std.ArrayList(TableLeafCell).initCapacity(alloc, cell_pointers.len);
     for (cell_pointers) |cell_ptr| {
@@ -95,14 +93,14 @@ fn parse_table_leaf_page(alloc: Allocator, decoder: *Decoder, ptr_offset: u16) !
     };
 }
 
-fn parse_page_header(decoder: *Decoder) !PageHeader {
-    const pt = try decoder.read_enum(0, PageType);
+fn parse_page_header(decoder: *Decoder, page_offset: usize) !PageHeader {
+    const pt = try decoder.read_enum(page_offset, PageType);
     if (pt != .Leaf) return error.InvalidPageType;
 
-    const first_free_block = try decoder.read_int(cnst.PAGE_FIRST_FREEBLOCK_OFFSET, u16);
-    const cell_count_offset = try decoder.read_int(cnst.PAGE_CELL_COUNT_OFFSET, u16);
-    var cell_content_offset = @as(u32, try decoder.read_int(cnst.PAGE_CELL_CONTENT_OFFSET, u16));
-    const fragmented_byts_count = try decoder.read_int(cnst.PAGE_FRAGMENTED_BYTES_COUNT_OFFSET, u8);
+    const first_free_block = try decoder.read_int(page_offset + cnst.PAGE_FIRST_FREEBLOCK_OFFSET, u16);
+    const cell_count_offset = try decoder.read_int(page_offset + cnst.PAGE_CELL_COUNT_OFFSET, u16);
+    var cell_content_offset = @as(u32, try decoder.read_int(page_offset + cnst.PAGE_CELL_CONTENT_OFFSET, u16));
+    const fragmented_byts_count = try decoder.read_int(page_offset + cnst.PAGE_FRAGMENTED_BYTES_COUNT_OFFSET, u8);
 
     if (cell_content_offset == 0) cell_content_offset = 65535;
 
@@ -116,11 +114,11 @@ fn parse_page_header(decoder: *Decoder) !PageHeader {
 }
 
 // caller owns the returned slice
-fn parse_cell_pointers(alloc: Allocator, decoder: *const Decoder, n: usize, ptr_offset: u16) ![]u16 {
+fn parse_cell_pointers(alloc: Allocator, decoder: *const Decoder, page_offset: usize, n: usize) ![]u16 {
     var pointers = try std.ArrayList(u16).initCapacity(alloc, n);
     for (0..n) |ix| {
         // absolute positions of the pointers of the cells need to be pushed to the array
-        try pointers.append(alloc, try decoder.read_int(cnst.PAGE_LEAF_HEADER_SIZE + 2 * ix, u16) - ptr_offset);
+        try pointers.append(alloc, try decoder.read_int(page_offset + cnst.PAGE_LEAF_HEADER_SIZE + 2 * ix, u16));
     }
 
     return pointers.toOwnedSlice(alloc);
@@ -201,13 +199,9 @@ pub const RecordHeader = struct {
 };
 
 pub fn parse_record_header(alloc: Allocator, decoder: *Decoder) !RecordHeader {
-    // res here = varint_size, header_length
-    const res = try read_varint_at(decoder, 0);
-    const fields = try std.ArrayList(RecordField).initCapacity(alloc, decoder.buffer.len);
-    const cur_ofs = res.res;
-
-    const ofs: u8 = 0;
-    // ...
+    _ = alloc;
+    _ = decoder;
+    return error.Unimplemented;
 }
 
 const t = std.testing;
@@ -224,27 +218,33 @@ test "read_varint_at" {
 
 // TODO: change this test to use an encoder instead of defining a raw byte array
 test "parse_page" {
-    const buf = [_]u8{
-        0x00, // page type: Leaf in your enum as currently written
-        0x00, 0x00, // first free block
-        0x00, 0x01, // cell count = 1
-        0x00, 0x10, // cell content offset = 16
-        0x00, // fragmented bytes count
-        0x00, 0x10, // one cell pointer -> byte offset 16
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // filler to reach offset 16
-        0x05, // varint: payload size = 5
-        0x01, // varint: row_id = 1
-        0xAA, 0xBB, 0xCC, 0xDD, 0xEE, // payload
-    };
+    var buf = [_]u8{0} ** 123;
+    buf[100] = 0x0D; // page type: SQLite table leaf page
+    buf[101] = 0x00;
+    buf[102] = 0x00; // first free block
+    buf[103] = 0x00;
+    buf[104] = 0x01; // cell count = 1
+    buf[105] = 0x00;
+    buf[106] = 0x74; // cell content offset = 116
+    buf[107] = 0x00; // fragmented bytes count
+    buf[108] = 0x00;
+    buf[109] = 0x74; // one cell pointer -> absolute byte offset 116 in page 1
+    buf[116] = 0x05; // varint: payload size = 5
+    buf[117] = 0x01; // varint: row_id = 1
+    buf[118] = 0xAA;
+    buf[119] = 0xBB;
+    buf[120] = 0xCC;
+    buf[121] = 0xDD;
+    buf[122] = 0xEE; // payload
 
     var scratch: [1024]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&scratch);
 
-    const pg = try parse_page(fba.allocator(), &buf, 0);
+    const pg = try parse_page(fba.allocator(), &buf, 1);
     try t.expectEqual(PageType.Leaf, pg.Leaf.header.page_type);
     try t.expectEqual(@as(u16, 1), pg.Leaf.header.cell_count);
     try t.expectEqual(@as(usize, 1), pg.Leaf.cell_pointers.len);
-    try t.expectEqual(@as(u16, 16), pg.Leaf.cell_pointers[0]);
+    try t.expectEqual(@as(u16, 116), pg.Leaf.cell_pointers[0]);
     try t.expectEqual(@as(usize, 1), pg.Leaf.cells.items.len);
     try t.expectEqual(@as(i64, 5), pg.Leaf.cells.items[0].size);
     try t.expectEqual(@as(i64, 1), pg.Leaf.cells.items[0].row_id);
