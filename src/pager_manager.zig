@@ -48,6 +48,7 @@ test "load_page" {
     var file = try std.fs.cwd().createFile("data.bin", .{
         .read = true,
     });
+
     defer file.close();
     defer std.fs.cwd().deleteFile("data.bin") catch {};
 

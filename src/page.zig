@@ -141,7 +141,7 @@ fn parse_table_leaf_cell(decoder: *Decoder, cell_ptr: u16) !TableLeafCell {
     };
 }
 
-fn read_varint_at(decoder: *Decoder, offset: usize) !struct { n: u8, res: i64 } {
+pub fn read_varint_at(decoder: *Decoder, offset: usize) !struct { n: u8, res: i64 } {
     var size: u8 = 0;
     var result: i64 = 0;
     var ofs = offset;
@@ -153,11 +153,13 @@ fn read_varint_at(decoder: *Decoder, offset: usize) !struct { n: u8, res: i64 } 
         if (size == 8) {
             // this shifts 8 bits to the left in result,
             // moves bits from cur_byte to result
+            // since this is the last byte, all bits represent info
+            // there is no control bit in here hence no masking required
             result = (result << 8) | cur_byte;
         } else {
-            // shift 7 bits to left
-            // mask payload bits (i.e. skip continutation bit) from cur_byte
-            // or the shifted result bits and masked bits of cur_byte
+            // masking is basically for removing the control bit
+            // shifting bits is for making space for the new bits of the cur_byte
+            // remember, result is a 64 bit integer
             result = (result << 7) | (cur_byte & 0b0111_1111);
         }
 
@@ -172,6 +174,40 @@ fn read_varint_at(decoder: *Decoder, offset: usize) !struct { n: u8, res: i64 } 
         .n = size,
         .res = result,
     };
+}
+
+pub const RecordFieldType = enum {
+    Null,
+    I8,
+    I16,
+    I24,
+    I32,
+    I48,
+    I64,
+    Float,
+    Zero,
+    One,
+    String,
+    Blob,
+};
+
+pub const RecordField = struct {
+    offset: usize,
+    field_type: RecordFieldType,
+};
+
+pub const RecordHeader = struct {
+    fields: []RecordField,
+};
+
+pub fn parse_record_header(alloc: Allocator, decoder: *Decoder) !RecordHeader {
+    // res here = varint_size, header_length
+    const res = try read_varint_at(decoder, 0);
+    const fields = try std.ArrayList(RecordField).initCapacity(alloc, decoder.buffer.len);
+    const cur_ofs = res.res;
+
+    const ofs: u8 = 0;
+    // ...
 }
 
 const t = std.testing;
