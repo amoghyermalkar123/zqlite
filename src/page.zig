@@ -93,7 +93,7 @@ fn parse_table_leaf_page(alloc: Allocator, decoder: *Decoder, page_offset: usize
     };
 }
 
-fn parse_page_header(decoder: *Decoder, page_offset: usize) !PageHeader {
+pub fn parse_page_header(decoder: *Decoder, page_offset: usize) !PageHeader {
     const pt = try decoder.read_enum(page_offset, PageType);
     if (pt != .Leaf) return error.InvalidPageType;
 
@@ -102,7 +102,7 @@ fn parse_page_header(decoder: *Decoder, page_offset: usize) !PageHeader {
     var cell_content_offset = @as(u32, try decoder.read_int(page_offset + cnst.PAGE_CELL_CONTENT_OFFSET, u16));
     const fragmented_byts_count = try decoder.read_int(page_offset + cnst.PAGE_FRAGMENTED_BYTES_COUNT_OFFSET, u8);
 
-    if (cell_content_offset == 0) cell_content_offset = 65535;
+    if (cell_content_offset == 0) cell_content_offset = 65536;
 
     return PageHeader{
         .page_type = pt,
@@ -174,7 +174,7 @@ pub fn read_varint_at(decoder: *Decoder, offset: usize) !struct { n: u8, res: i6
     };
 }
 
-pub const RecordFieldType = enum {
+pub const RecordFieldType = union(enum) {
     Null,
     I8,
     I16,
@@ -185,8 +185,8 @@ pub const RecordFieldType = enum {
     Float,
     Zero,
     One,
-    String,
-    Blob,
+    String: usize,
+    Blob: usize,
 };
 
 pub const RecordField = struct {
@@ -198,10 +198,57 @@ pub const RecordHeader = struct {
     fields: []RecordField,
 };
 
-pub fn parse_record_header(alloc: Allocator, decoder: *Decoder) !RecordHeader {
-    _ = alloc;
-    _ = decoder;
-    return error.Unimplemented;
+// returns a parsed `RecordHeader`, the caller owns `fields memory`
+pub fn parse_record_header(alloc: Allocator, cell_payload: []const u8) !RecordHeader {
+    var decoder = Decoder{ .buffer = cell_payload };
+
+    const header_data = try read_varint_at(&decoder, 0);
+
+    var fields = try std.ArrayList(RecordField).initCapacity(alloc, 10);
+    errdefer fields.deinit(alloc);
+
+    var buffer_cur = header_data.n;
+    var field_payl_cur: usize = @intCast(header_data.res);
+
+    while (@as(i64, buffer_cur) < header_data.res) {
+        const discr_data = try read_varint_at(&decoder, buffer_cur);
+        buffer_cur += discr_data.n;
+
+        const field_data: struct { field_type: RecordFieldType, field_size: usize } = switch (discr_data.res) {
+            0 => .{ .field_type = RecordFieldType.Null, .field_size = 0 },
+            1 => .{ .field_type = RecordFieldType.I8, .field_size = 1 },
+            2 => .{ .field_type = RecordFieldType.I16, .field_size = 2 },
+            3 => .{ .field_type = RecordFieldType.I24, .field_size = 3 },
+            4 => .{ .field_type = RecordFieldType.I32, .field_size = 4 },
+            5 => .{ .field_type = RecordFieldType.I48, .field_size = 6 },
+            6 => .{ .field_type = RecordFieldType.I64, .field_size = 8 },
+            7 => .{ .field_type = RecordFieldType.Float, .field_size = 8 },
+            8 => .{ .field_type = RecordFieldType.Zero, .field_size = 0 },
+            9 => .{ .field_type = RecordFieldType.One, .field_size = 0 },
+            else => blk: {
+                if (discr_data.res >= 12 and @rem(discr_data.res, 2) == 0) {
+                    const sz: usize = @intCast(@divTrunc(discr_data.res - 12, 2));
+                    break :blk .{ .field_type = .{ .Blob = sz }, .field_size = sz };
+                }
+
+                if (discr_data.res >= 13 and @rem(discr_data.res, 2) == 1) {
+                    const sz: usize = @intCast(@divTrunc(discr_data.res - 13, 2));
+                    break :blk .{ .field_type = .{ .String = sz }, .field_size = sz };
+                }
+
+                return error.UnsupportedRecordFieldType;
+            },
+        };
+
+        try fields.append(alloc, .{
+            .field_type = field_data.field_type,
+            .offset = field_payl_cur,
+        });
+
+        field_payl_cur += field_data.field_size;
+    }
+
+    return .{ .fields = try fields.toOwnedSlice(alloc) };
 }
 
 const t = std.testing;
@@ -214,6 +261,32 @@ test "read_varint_at" {
     const res = try read_varint_at(&dec, 0);
     try t.expectEqual(@as(u8, 2), res.n);
     try t.expectEqual(@as(i64, 172), res.res);
+}
+
+test "parse_record_header" {
+    var scratch: [256]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&scratch);
+
+    const payload = [_]u8{
+        0x03, // header size
+        0x01, // serial type: i8
+        0x0F, // serial type: string(1)
+        0x2A, // field 0 body byte
+        0x68, // field 1 body byte
+    };
+
+    const hdr = try parse_record_header(fba.allocator(), &payload);
+
+    try t.expectEqual(@as(usize, 2), hdr.fields.len);
+    try t.expectEqual(@as(usize, 3), hdr.fields[0].offset);
+    try t.expectEqual(@as(usize, 4), hdr.fields[1].offset);
+
+    try t.expectEqual(RecordFieldType.I8, hdr.fields[0].field_type);
+
+    switch (hdr.fields[1].field_type) {
+        .String => |len| try t.expectEqual(@as(usize, 1), len),
+        else => return error.UnexpectedRecordFieldType,
+    }
 }
 
 // TODO: change this test to use an encoder instead of defining a raw byte array

@@ -1,5 +1,7 @@
 const std = @import("std");
 const Page = @import("page.zig");
+const parse_header = @import("main.zig").parse_header;
+const cnst = @import("constants.zig");
 const Allocator = std.mem.Allocator;
 
 f: std.fs.File,
@@ -8,10 +10,19 @@ pages: std.AutoHashMap(usize, Page.Page),
 
 const Self = @This();
 
-pub fn new(alloc: Allocator, f: std.fs.File, page_size: usize) !Self {
+pub fn new(alloc: Allocator, f: std.fs.File) !Self {
+    try f.seekTo(0);
+
+    var header_buffer: [cnst.HEADER_SIZE]u8 = undefined;
+    const nread = try f.readAll(&header_buffer);
+
+    if (nread != header_buffer.len) return error.EndOfStream;
+
+    const header = try parse_header(header_buffer);
+
     return .{
         .f = f,
-        .page_size = page_size,
+        .page_size = @intCast(header.page_size),
         .pages = .init(alloc),
     };
 }
@@ -53,6 +64,9 @@ test "load_page" {
     defer std.fs.cwd().deleteFile("data.bin") catch {};
 
     var full_page = [_]u8{0} ** 4096;
+    @memcpy(full_page[0..cnst.HEADER_PREFIX.len], cnst.HEADER_PREFIX);
+    full_page[16] = 0x10;
+    full_page[17] = 0x00; // page size = 4096
     full_page[100] = 0x0D; // page type: SQLite table leaf page
     full_page[101] = 0x00;
     full_page[102] = 0x00; // first free block
@@ -74,15 +88,12 @@ test "load_page" {
 
     try file.writeAll(&full_page);
 
-    var pm = Self{
-        .page_size = 4096,
-        .pages = .init(fba.allocator()),
-        .f = file,
-    };
+    var pm = try Self.new(fba.allocator(), file, 4096);
 
     const page = try load_page(&pm, fba.allocator(), 1);
     try t.expectEqual(Page.PageType.Leaf, page.Leaf.header.page_type);
     try t.expectEqual(@as(u16, 1), page.Leaf.header.cell_count);
     try t.expectEqual(@as(usize, 1), page.Leaf.cells.items.len);
     try t.expectEqual(@as(i64, 1), page.Leaf.cells.items[0].row_id);
+    try t.expectEqual(@as(usize, 4096), pm.page_size);
 }
