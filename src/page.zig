@@ -28,6 +28,7 @@ pub fn parse_header(buffer: []const u8) !DbHeader {
 
 pub const Page = union(PageType) {
     Leaf: TableLeafPage,
+    Interior: TableInteriorPage,
 };
 
 // A leaf page is the complete representation of a full page
@@ -39,6 +40,14 @@ pub const TableLeafPage = struct {
     cells: std.ArrayList(TableLeafCell),
 };
 
+// An interior page holds info about where next pages are based on
+// ordered keys
+pub const TableInteriorPage = struct {
+    header: PageHeader,
+    cell_pointers: []u16,
+    cells: std.ArrayList(TableInteriorCell),
+};
+
 // Page header contains metadata
 pub const PageHeader = struct {
     page_type: PageType,
@@ -46,6 +55,8 @@ pub const PageHeader = struct {
     cell_count: u16,
     cell_content_offset: u32,
     fragmented_byts_count: u8,
+    // only stored when the page is interior
+    rightmost_pointer: ?u32 = null,
 };
 
 // An Actual cell which contains the data
@@ -55,8 +66,15 @@ pub const TableLeafCell = struct {
     payload: []const u8,
 };
 
+// a cell which holds tuple data which points to the next subtree containing the key
+pub const TableInteriorCell = struct {
+    left_child_page: u32,
+    key: i64,
+};
+
 pub const PageType = enum(u8) {
     Leaf = 0x0D,
+    Interior = 0x05,
 };
 
 pub const Decoder = struct {
@@ -100,23 +118,41 @@ fn parse_table_leaf_page(alloc: Allocator, decoder: *Decoder, page_offset: usize
     // parse cell pointers
     const cell_pointers = try parse_cell_pointers(alloc, decoder, page_offset, pg_hdr.cell_count);
     // parse cells
-    var cells = try std.ArrayList(TableLeafCell).initCapacity(alloc, cell_pointers.len);
-    for (cell_pointers) |cell_ptr| {
-        try cells.append(alloc, try parse_table_leaf_cell(decoder, cell_ptr));
-    }
+    switch (pg_hdr.page_type) {
+        .Leaf => {
+            var cells = try std.ArrayList(TableLeafCell).initCapacity(alloc, cell_pointers.len);
+            for (cell_pointers) |cell_ptr| {
+                try cells.append(alloc, try parse_table_leaf_cell(decoder, cell_ptr));
+            }
 
-    return Page{
-        .Leaf = .{
-            .header = pg_hdr,
-            .cell_pointers = cell_pointers,
-            .cells = cells,
+            return Page{
+                .Leaf = .{
+                    .header = pg_hdr,
+                    .cell_pointers = cell_pointers,
+                    .cells = cells,
+                },
+            };
         },
-    };
+        .Interior => {
+            var cells = try std.ArrayList(TableInteriorCell).initCapacity(alloc, cell_pointers.len);
+            for (cell_pointers) |cell_ptr| {
+                try cells.append(alloc, try parse_table_internal_cell(decoder, cell_ptr));
+            }
+
+            return Page{
+                .Interior = .{
+                    .header = pg_hdr,
+                    .cell_pointers = cell_pointers,
+                    .cells = cells,
+                },
+            };
+        },
+    }
 }
 
 pub fn parse_page_header(decoder: *Decoder, page_offset: usize) !PageHeader {
     const pt = try decoder.read_enum(page_offset, PageType);
-    if (pt != .Leaf) return error.InvalidPageType;
+    if (pt != .Leaf or pt != .Interior) return error.InvalidPageType;
 
     const first_free_block = try decoder.read_int(page_offset + cnst.PAGE_FIRST_FREEBLOCK_OFFSET, u16);
     const cell_count_offset = try decoder.read_int(page_offset + cnst.PAGE_CELL_COUNT_OFFSET, u16);
@@ -131,6 +167,7 @@ pub fn parse_page_header(decoder: *Decoder, page_offset: usize) !PageHeader {
         .cell_content_offset = cell_content_offset,
         .cell_count = cell_count_offset,
         .first_free_block = first_free_block,
+        .rightmost_pointer = if (pt == .Interior) try decoder.read_int(cnst.PAGE_FIRST_FREEBLOCK_OFFSET, u32),
     };
 }
 
@@ -157,6 +194,16 @@ fn parse_table_leaf_cell(decoder: *Decoder, cell_ptr: u16) !TableLeafCell {
         .payload = payload,
         .row_id = row_id_result.res,
         .size = size_result.res,
+    };
+}
+
+fn parse_table_internal_cell(decoder: *Decoder, cell_ptr: u16) !TableInteriorCell {
+    const left_child_page = try decoder.read_int(cell_ptr, u32);
+    const key_res = try read_varint_at(decoder, cell_ptr + 4);
+
+    return TableInteriorCell{
+        .left_child_page = left_child_page,
+        .key = key_res.res,
     };
 }
 

@@ -12,6 +12,7 @@ pub const Value = union(enum) {
 };
 
 // Uniquely indentifies a single record
+// it is a cursor over a cell in a leaf page
 pub const Cursor = struct {
     header: RecordHeader,
     pager: *Pager,

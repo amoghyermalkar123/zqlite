@@ -12,6 +12,9 @@ page: usize,
 cell: usize = 0,
 alloc: Allocator,
 
+/// An Element is an item in a page. It can be a Page or a Cursor
+pub const Element = struct {};
+
 pub fn new(pager: *Pager, alloc: Allocator, page_num: usize) !Self {
     return .{ .pager = pager, .page = page_num, .alloc = alloc };
 }
