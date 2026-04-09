@@ -1,12 +1,13 @@
 const std = @import("std");
 const Page = @import("page.zig");
-const parse_header = @import("main.zig").parse_header;
+const parse_header = @import("page.zig").parse_header;
 const cnst = @import("constants.zig");
 const Allocator = std.mem.Allocator;
 
 f: std.fs.File,
 page_size: usize,
 pages: std.AutoHashMap(usize, Page.Page),
+alloc: Allocator,
 
 const Self = @This();
 
@@ -18,22 +19,30 @@ pub fn new(alloc: Allocator, f: std.fs.File) !Self {
 
     if (nread != header_buffer.len) return error.EndOfStream;
 
-    const header = try parse_header(header_buffer);
+    const header = try parse_header(&header_buffer);
 
     return .{
         .f = f,
         .page_size = @intCast(header.page_size),
         .pages = .init(alloc),
+        .alloc = alloc,
     };
 }
 
-pub fn read_page(self: *Self, n: usize) !*const Page {
+pub fn read_page(self: *Self, n: usize) !*const Page.Page {
+    // cache hit
     if (self.pages.contains(n)) {
-        return self.pages.get(n) orelse unreachable;
+        return self.pages.getPtr(n) orelse unreachable;
     }
+
+    // cache miss
+    const pg = try self.load_page(n);
+    try self.pages.put(n, pg);
+
+    return self.pages.getPtr(n) orelse unreachable;
 }
 
-fn load_page(self: *Self, alloc: Allocator, n: usize) !Page.Page {
+fn load_page(self: *Self, n: usize) !Page.Page {
     if (n == 0) return error.InvalidPageNumber;
 
     const page_index = n - 1;
@@ -41,13 +50,13 @@ fn load_page(self: *Self, alloc: Allocator, n: usize) !Page.Page {
 
     try self.f.seekTo(@intCast(offset));
 
-    const buffer = try alloc.alloc(u8, self.page_size);
-    errdefer alloc.free(buffer);
+    const buffer = try self.alloc.alloc(u8, self.page_size);
+    errdefer self.alloc.free(buffer);
 
     const nread = try self.f.readAll(buffer);
     if (nread != buffer.len) return error.EndOfStream;
 
-    return Page.parse_page(alloc, buffer, n);
+    return Page.parse_page(self.alloc, buffer, n);
 }
 
 const t = std.testing;
@@ -88,9 +97,9 @@ test "load_page" {
 
     try file.writeAll(&full_page);
 
-    var pm = try Self.new(fba.allocator(), file, 4096);
+    var pm = try Self.new(fba.allocator(), file);
 
-    const page = try load_page(&pm, fba.allocator(), 1);
+    const page = try load_page(&pm, 1);
     try t.expectEqual(Page.PageType.Leaf, page.Leaf.header.page_type);
     try t.expectEqual(@as(u16, 1), page.Leaf.header.cell_count);
     try t.expectEqual(@as(usize, 1), page.Leaf.cells.items.len);

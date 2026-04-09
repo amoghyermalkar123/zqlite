@@ -1,22 +1,73 @@
 const std = @import("std");
+const pg = @import("page.zig");
+const pgm = @import("pager_manager.zig");
+const Allocator = std.mem.Allocator;
 const cnst = @import("constants.zig");
+const Scanner = @import("scanner.zig");
+const db = @import("db.zig");
 
-pub const DbHeader = struct {
-    page_size: u32,
-};
+pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const alloc = gpa.allocator();
 
-pub fn parse_header(buffer: []const u8) !DbHeader {
-    if (buffer.len < cnst.HEADER_SIZE) {
-        return error.InvalidHeaderSize;
+    const args = try std.process.argsAlloc(alloc);
+    defer std.process.argsFree(alloc, args);
+
+    if (args.len < 2) {
+        std.debug.print("usage: zsqlite <db-file>\n", .{});
+        return error.MissingDatabasePath;
     }
 
-    if (!std.mem.startsWith(u8, buffer, cnst.HEADER_PREFIX)) {
-        return error.InvalidHeaderPrefix;
-    }
+    var new_db = try db.from_file(alloc, args[1]);
+    try cli(alloc, &new_db);
+}
 
-    const page_size_raw = std.mem.readInt(u16, buffer[cnst.HEADER_PAGE_SIZE_OFFSET..][0..cnst.HEADER_PAGE_SIZE_SIZE], .big);
-    // page_size 1 is used to indicate max page size
-    return DbHeader{
-        .page_size = if (page_size_raw == 1) cnst.PAGE_MAX_SIZE else if (page_size_raw & (page_size_raw - 1) == 0 and page_size_raw != 0) page_size_raw else return error.InvalidPageSize,
-    };
+fn cli(alloc: Allocator, dba: *db) !void {
+    var stdin_buf: [1024]u8 = undefined;
+    var stdout_buf: [1024]u8 = undefined;
+
+    var stdin_reader = std.fs.File.stdin().reader(&stdin_buf);
+    const stdin = &stdin_reader.interface;
+
+    var stdout_writer = std.fs.File.stdout().writer(&stdout_buf);
+    const stdout = &stdout_writer.interface;
+
+    while (true) {
+        try stdout.print("zsqlite> ", .{});
+        try stdout.flush();
+
+        const line_opt = try stdin.takeDelimiter('\n');
+        const line = line_opt orelse break;
+
+        const input = std.mem.trim(u8, line, " \r\n\t");
+
+        if (input.len == 0) continue;
+
+        if (std.mem.eql(u8, input, ".exit")) {
+            break;
+        } else if (std.mem.eql(u8, input, ".tables")) {
+            try display_tables(alloc, dba);
+        } else {
+            try stdout.print("unknown command: {s}\n", .{input});
+            try stdout.flush();
+        }
+    }
+}
+
+fn display_tables(alloc: Allocator, dba: *db) !void {
+    var scan = try dba.scanner(alloc, 1);
+    while (true) {
+        var rec = scan.next_record() catch {
+            std.debug.print("end of scanner, exiting\n", .{});
+            break;
+        };
+
+        const tv = try rec.field(1) orelse {
+            std.debug.print("missing name field", .{});
+            break;
+        };
+
+        std.debug.print("field: {any}", .{tv});
+    }
 }

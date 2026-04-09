@@ -6,6 +6,26 @@ const std = @import("std");
 const cnst = @import("constants.zig");
 const Allocator = std.mem.Allocator;
 
+pub const DbHeader = struct {
+    page_size: u32,
+};
+
+pub fn parse_header(buffer: []const u8) !DbHeader {
+    if (buffer.len < cnst.HEADER_SIZE) {
+        return error.InvalidHeaderSize;
+    }
+
+    if (!std.mem.startsWith(u8, buffer, cnst.HEADER_PREFIX)) {
+        return error.InvalidHeaderPrefix;
+    }
+
+    const page_size_raw = std.mem.readInt(u16, buffer[cnst.HEADER_PAGE_SIZE_OFFSET..][0..cnst.HEADER_PAGE_SIZE_SIZE], .big);
+    // page_size 1 is used to indicate max page size
+    return DbHeader{
+        .page_size = if (page_size_raw == 1) cnst.PAGE_MAX_SIZE else if (page_size_raw & (page_size_raw - 1) == 0 and page_size_raw != 0) page_size_raw else return error.InvalidPageSize,
+    };
+}
+
 pub const Page = union(PageType) {
     Leaf: TableLeafPage,
 };
@@ -39,26 +59,27 @@ pub const PageType = enum(u8) {
     Leaf = 0x0D,
 };
 
-const Decoder = struct {
+pub const Decoder = struct {
     buffer: []const u8,
 
     const Self = @This();
 
-    fn read_int(self: *const Self, index: usize, comptime T: type) !T {
+    pub fn read_int(self: *const Self, index: usize, comptime T: type) !T {
         var ix = index;
-        if (ix + @sizeOf(T) > self.buffer.len) return error.BufferExhausted;
-        defer ix += @sizeOf(T);
+        const int_size = @divExact(@typeInfo(T).int.bits, 8);
+        if (ix + int_size > self.buffer.len) return error.BufferExhausted;
+        defer ix += int_size;
 
-        return std.mem.readInt(T, self.buffer[ix .. ix + @sizeOf(T)][0..@sizeOf(T)], .big);
+        return std.mem.readInt(T, self.buffer[ix .. ix + int_size][0..int_size], .big);
     }
 
     // fn read_int_at(self: *Self, from: usize, comptime T: type) !T {}
 
-    fn read_enum(self: *const Self, index: usize, comptime T: type) !T {
+    pub fn read_enum(self: *const Self, index: usize, comptime T: type) !T {
         return std.enums.fromInt(T, try self.read_int(index, std.meta.Tag(T))) orelse error.InvalidEnumTag;
     }
 
-    fn read_slice(self: *const Self, from: usize, len: usize) ![]const u8 {
+    pub fn read_slice(self: *const Self, from: usize, len: usize) ![]const u8 {
         if (from + len > self.buffer.len) return error.BufferExhausted;
         return self.buffer[from .. from + len];
     }
@@ -198,6 +219,40 @@ pub const RecordHeader = struct {
     fields: []RecordField,
 };
 
+/// SQLite record payload layout:
+///
+/// |<----------- record header ----------->|<------ record body ------>|
+/// | header_size varint | serial type ...  | field 0 bytes | field ... |
+///
+/// Example payload:
+///
+///   [03] [01] [0F] [2A] [68]
+///    |    |    |    |    |
+///    |    |    |    |    field 1 body byte
+///    |    |    |    field 0 body byte
+///    |    |    serial type for field 1
+///    |    serial type for field 0
+///    header_size varint
+///
+/// For that example:
+///
+/// - `header_size = 3`, so header bytes are `[03][01][0F]`
+/// - body starts at byte offset `3`
+/// - serial type `1` maps to `I8`, so field 0 starts at offset `3`
+/// - serial type `15` maps to `String(1)`, so field 1 starts at offset `4`
+///
+/// Cursor meaning inside this function:
+///
+/// - `buffer_cur` walks serial-type varints inside the header
+/// - `field_payl_cur` walks field data inside the body
+///
+/// Final parsed header for the example:
+///
+///   fields = [
+///     { offset = 3, field_type = I8 },
+///     { offset = 4, field_type = String(1) },
+///   ]
+///
 // returns a parsed `RecordHeader`, the caller owns `fields memory`
 pub fn parse_record_header(alloc: Allocator, cell_payload: []const u8) !RecordHeader {
     var decoder = Decoder{ .buffer = cell_payload };
