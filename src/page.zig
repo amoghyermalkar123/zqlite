@@ -105,11 +105,13 @@ pub const Decoder = struct {
 
 pub fn parse_page(alloc: Allocator, buffer: []const u8, page_num: usize) !Page {
     const page_offset = if (page_num == 1) cnst.HEADER_SIZE else 0;
-    const pt: PageType = @enumFromInt(buffer[page_offset]);
-
-    if (pt != .Leaf) return error.UnknownPageType;
 
     var decoder = Decoder{ .buffer = buffer };
+
+    const pt = try decoder.read_enum(page_offset, PageType);
+
+    if (pt != .Leaf and pt != .Interior) return error.UnknownPageType;
+
     return parse_table_leaf_page(alloc, &decoder, page_offset);
 }
 
@@ -152,7 +154,7 @@ fn parse_table_leaf_page(alloc: Allocator, decoder: *Decoder, page_offset: usize
 
 pub fn parse_page_header(decoder: *Decoder, page_offset: usize) !PageHeader {
     const pt = try decoder.read_enum(page_offset, PageType);
-    if (pt != .Leaf or pt != .Interior) return error.InvalidPageType;
+    if (pt != .Leaf and pt != .Interior) return error.InvalidPageType;
 
     const first_free_block = try decoder.read_int(page_offset + cnst.PAGE_FIRST_FREEBLOCK_OFFSET, u16);
     const cell_count_offset = try decoder.read_int(page_offset + cnst.PAGE_CELL_COUNT_OFFSET, u16);
@@ -167,7 +169,7 @@ pub fn parse_page_header(decoder: *Decoder, page_offset: usize) !PageHeader {
         .cell_content_offset = cell_content_offset,
         .cell_count = cell_count_offset,
         .first_free_block = first_free_block,
-        .rightmost_pointer = if (pt == .Interior) try decoder.read_int(cnst.PAGE_FIRST_FREEBLOCK_OFFSET, u32),
+        .rightmost_pointer = if (pt == .Interior) try decoder.read_int(page_offset + cnst.PAGE_LEAF_HEADER_SIZE, u32) else null,
     };
 }
 

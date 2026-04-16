@@ -1,27 +1,29 @@
 const std = @import("std");
+const Io = std.Io;
 const Page = @import("page.zig");
 const parse_header = @import("page.zig").parse_header;
 const cnst = @import("constants.zig");
 const Allocator = std.mem.Allocator;
 
-f: std.fs.File,
+io: Io,
+f: Io.File,
 page_size: usize,
 pages: std.AutoHashMap(usize, Page.Page),
 alloc: Allocator,
 
 const Self = @This();
 
-pub fn new(alloc: Allocator, f: std.fs.File) !Self {
-    try f.seekTo(0);
-
+pub fn new(alloc: Allocator, io: Io, f: Io.File) !Self {
     var header_buffer: [cnst.HEADER_SIZE]u8 = undefined;
-    const nread = try f.readAll(&header_buffer);
-
-    if (nread != header_buffer.len) return error.EndOfStream;
+    var reader_buf: [256]u8 = undefined;
+    var file_reader = f.reader(io, &reader_buf);
+    try file_reader.seekTo(0);
+    try file_reader.interface.readSliceAll(&header_buffer);
 
     const header = try parse_header(&header_buffer);
 
     return .{
+        .io = io,
         .f = f,
         .page_size = @intCast(header.page_size),
         .pages = .init(alloc),
@@ -48,13 +50,13 @@ fn load_page(self: *Self, n: usize) !Page.Page {
     const page_index = n - 1;
     const offset = page_index * self.page_size;
 
-    try self.f.seekTo(@intCast(offset));
-
     const buffer = try self.alloc.alloc(u8, self.page_size);
     errdefer self.alloc.free(buffer);
 
-    const nread = try self.f.readAll(buffer);
-    if (nread != buffer.len) return error.EndOfStream;
+    var reader_buf: [1024]u8 = undefined;
+    var file_reader = self.f.reader(self.io, &reader_buf);
+    try file_reader.seekTo(@intCast(offset));
+    try file_reader.interface.readSliceAll(buffer);
 
     return Page.parse_page(self.alloc, buffer, n);
 }

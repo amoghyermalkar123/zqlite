@@ -65,6 +65,7 @@ const t = std.testing;
 test "Cursor.field decodes integer and string fields from cached page" {
     var scratch: [2048]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&scratch);
+    const io = t.io;
 
     const payload = [_]u8{
         0x03, // header size
@@ -103,6 +104,7 @@ test "Cursor.field decodes integer and string fields from cached page" {
 
     var pager: Pager = .{
         .f = undefined,
+        .io = io,
         .page_size = 4096,
         .pages = pages,
         .alloc = fba.allocator(),

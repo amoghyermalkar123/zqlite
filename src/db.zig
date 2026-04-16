@@ -1,4 +1,5 @@
 const std = @import("std");
+const Io = std.Io;
 const pg = @import("page.zig");
 const pgm = @import("pager_manager.zig");
 const Allocator = std.mem.Allocator;
@@ -10,13 +11,15 @@ pager: pgm,
 
 const Self = @This();
 
-pub fn from_file(alloc: Allocator, filename: []const u8) !Self {
-    const f = try std.fs.openFileAbsolute(filename, .{ .mode = .read_write });
+pub fn from_file(io: Io, alloc: Allocator, filename: []const u8) !Self {
+    const f = try Io.Dir.openFileAbsolute(io, filename, .{ .mode = .read_write });
 
     var header_buffer: [cnst.HEADER_SIZE]u8 = undefined;
-    _ = try f.read(&header_buffer);
+    var reader_buf: [256]u8 = undefined;
+    var file_reader = f.reader(io, &reader_buf);
+    try file_reader.interface.readSliceAll(&header_buffer);
 
-    const pgmer = try pgm.new(alloc, f);
+    const pgmer = try pgm.new(alloc, io, f);
 
     return .{
         .pager = pgmer,

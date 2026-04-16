@@ -1,4 +1,5 @@
 const std = @import("std");
+const Io = std.Io;
 const pg = @import("page.zig");
 const pgm = @import("pager_manager.zig");
 const Allocator = std.mem.Allocator;
@@ -6,31 +7,28 @@ const cnst = @import("constants.zig");
 const Scanner = @import("scanner.zig");
 const db = @import("db.zig");
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const alloc = gpa.allocator();
-
-    const args = try std.process.argsAlloc(alloc);
-    defer std.process.argsFree(alloc, args);
+pub fn main(init: std.process.Init) !void {
+    const alloc = init.gpa;
+    const io = init.io;
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
 
     if (args.len < 2) {
         std.debug.print("usage: zsqlite <db-file>\n", .{});
         return error.MissingDatabasePath;
     }
 
-    var new_db = try db.from_file(alloc, args[1]);
-    try cli(alloc, &new_db);
+    var new_db = try db.from_file(io, alloc, args[1]);
+    try cli(io, alloc, &new_db);
 }
 
-fn cli(alloc: Allocator, dba: *db) !void {
+fn cli(io: Io, alloc: Allocator, dba: *db) !void {
     var stdin_buf: [1024]u8 = undefined;
     var stdout_buf: [1024]u8 = undefined;
 
-    var stdin_reader = std.fs.File.stdin().reader(&stdin_buf);
+    var stdin_reader = Io.File.stdin().reader(io, &stdin_buf);
     const stdin = &stdin_reader.interface;
 
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buf);
+    var stdout_writer = Io.File.stdout().writer(io, &stdout_buf);
     const stdout = &stdout_writer.interface;
 
     while (true) {

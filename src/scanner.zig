@@ -38,5 +38,6 @@ pub fn next_record(self: *Self) !Cursor {
 
             return record;
         },
+        .Interior => return error.UnsupportedPageType,
     }
 }
