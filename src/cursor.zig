@@ -15,9 +15,7 @@ pub const Value = union(enum) {
 // it is a cursor over a cell in a leaf page
 pub const Cursor = struct {
     header: RecordHeader,
-    pager: *Pager,
-    page_index: usize,
-    page_cell: usize,
+    payload: []u8 = undefined,
 
     const Self = @This();
 
@@ -27,9 +25,7 @@ pub const Cursor = struct {
         if (n >= self.header.fields.len) return error.InvalidIndex;
 
         const record_field = self.header.fields[n];
-        const page = try self.pager.read_page(self.page_index);
-        const cell = page.Leaf.cells.items[self.page_cell];
-        var decoder = pg.Decoder{ .buffer = cell.payload };
+        var decoder = pg.Decoder{ .buffer = self.payload };
 
         switch (record_field.field_type) {
             .Null => return .Null,

@@ -8,6 +8,7 @@ pub const HEADER_PAGE_SIZE_SIZE: usize = @sizeOf(u16);
 // Generic constants
 pub const PAGE_MAX_SIZE: u32 = 65536;
 pub const PAGE_LEAF_HEADER_SIZE: usize = 8;
+pub const PAGE_INTERIOR_HEADER_SIZE: usize = 12;
 
 // Page Header Offset constants
 pub const PAGE_FIRST_FREEBLOCK_OFFSET: usize = 1;

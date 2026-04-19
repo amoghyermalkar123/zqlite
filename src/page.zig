@@ -118,7 +118,11 @@ pub fn parse_page(alloc: Allocator, buffer: []const u8, page_num: usize) !Page {
 fn parse_table_leaf_page(alloc: Allocator, decoder: *Decoder, page_offset: usize) !Page {
     const pg_hdr = try parse_page_header(decoder, page_offset);
     // parse cell pointers
-    const cell_pointers = try parse_cell_pointers(alloc, decoder, page_offset, pg_hdr.cell_count);
+    const cell_pointers = try parse_cell_pointers(alloc, decoder, page_offset, pg_hdr.cell_count, switch (pg_hdr.page_type) {
+        .Leaf => cnst.PAGE_LEAF_HEADER_SIZE,
+        .Interior => cnst.PAGE_INTERIOR_HEADER_SIZE,
+    });
+
     // parse cells
     switch (pg_hdr.page_type) {
         .Leaf => {
@@ -174,11 +178,11 @@ pub fn parse_page_header(decoder: *Decoder, page_offset: usize) !PageHeader {
 }
 
 // caller owns the returned slice
-fn parse_cell_pointers(alloc: Allocator, decoder: *const Decoder, page_offset: usize, n: usize) ![]u16 {
+fn parse_cell_pointers(alloc: Allocator, decoder: *const Decoder, page_offset: usize, n: usize, header_size: usize) ![]u16 {
     var pointers = try std.ArrayList(u16).initCapacity(alloc, n);
     for (0..n) |ix| {
         // absolute positions of the pointers of the cells need to be pushed to the array
-        try pointers.append(alloc, try decoder.read_int(page_offset + cnst.PAGE_LEAF_HEADER_SIZE + 2 * ix, u16));
+        try pointers.append(alloc, try decoder.read_int(page_offset + header_size + 2 * ix, u16));
     }
 
     return pointers.toOwnedSlice(alloc);
