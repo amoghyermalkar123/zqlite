@@ -66,6 +66,6 @@ fn display_tables(alloc: Allocator, dba: *db) !void {
             break;
         };
 
-        std.debug.print("field: {any}", .{tv});
+        std.debug.print("field: {s}\n", .{tv.String.str});
     }
 }
