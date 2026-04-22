@@ -77,6 +77,7 @@ const ParserState = struct {
     fn parse_result_column(self: *Self) !ast.ResultColumn {
         const next = self.peek();
         if (next != null and next.? == Token.Star) {
+            self.advance();
             return .Star;
         }
 
