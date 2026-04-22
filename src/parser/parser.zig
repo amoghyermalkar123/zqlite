@@ -143,10 +143,36 @@ const ParserState = struct {
     }
 };
 
-pub fn parse_statement(input: []const u8, alloc: Allocator) !ast.Statement {
+pub const ParseResult = struct {
+    statement: ast.Statement,
+    tokens: []const Token,
+    alloc: Allocator,
+
+    pub fn deinit(self: *ParseResult) void {
+        // Free identifier strings inside tokens
+        for (self.tokens) |tok| {
+            switch (tok) {
+                .Identifier => |ident| self.alloc.free(ident),
+                else => {},
+            }
+        }
+        // Free the token slice itself
+        self.alloc.free(self.tokens);
+        // Free the result_columns ArrayList
+        switch (self.statement) {
+            .Select => |*sel| sel.core.result_columns.deinit(self.alloc),
+        }
+    }
+};
+
+pub fn parse_statement(input: []const u8, alloc: Allocator) !ParseResult {
     const tokens = try token.tokenize(alloc, input);
     var parser = ParserState.init(tokens);
     const statement = try parser.parse_statement(alloc);
     _ = try parser.expectNextTokenEq(Token.Semicolon);
-    return statement;
+    return .{
+        .statement = statement,
+        .tokens = tokens,
+        .alloc = alloc,
+    };
 }
