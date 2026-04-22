@@ -24,9 +24,18 @@ pub fn tokenize(alloc: Allocator, input: []const u8) ![]Token {
 
     while (i < input.len) {
         switch (input[i]) {
-            '*' => try tokens.append(alloc, Token.Star),
-            ',' => try tokens.append(alloc, Token.Comma),
-            ';' => try tokens.append(alloc, Token.Semicolon),
+            '*' => {
+                try tokens.append(alloc, Token.Star);
+                i += 1;
+            },
+            ',' => {
+                try tokens.append(alloc, Token.Comma);
+                i += 1;
+            },
+            ';' => {
+                try tokens.append(alloc, Token.Semicolon);
+                i += 1;
+            },
             ' ', '\n', '\r', '\t' => i += 1,
             else => {
                 if (std.ascii.isAlphabetic(input[i])) {

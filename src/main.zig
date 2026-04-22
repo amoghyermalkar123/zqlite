@@ -6,6 +6,7 @@ const Allocator = std.mem.Allocator;
 const cnst = @import("constants.zig");
 const Scanner = @import("scanner.zig");
 const db = @import("db.zig");
+const sql = @import("parser/parser.zig");
 
 pub fn main(init: std.process.Init) !void {
     const alloc = init.gpa;
@@ -47,7 +48,8 @@ fn cli(io: Io, alloc: Allocator, dba: *db) !void {
         } else if (std.mem.eql(u8, input, ".tables")) {
             try display_tables(alloc, dba);
         } else {
-            try stdout.print("unknown command: {s}\n", .{input});
+            const statement = try sql.parse_statement(input, alloc);
+            std.debug.print("sql: {any}", .{statement});
             try stdout.flush();
         }
     }
