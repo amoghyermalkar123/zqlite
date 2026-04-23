@@ -1,8 +1,10 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+pub const Create = @import("create.zig");
 
 pub const Statement = union(enum) {
     Select: SelectStatement,
+    CreateTable: Create.CreateTableStatement,
 };
 
 pub const SelectStatement = struct {

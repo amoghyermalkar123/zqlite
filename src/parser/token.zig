@@ -10,6 +10,10 @@ pub const Token = union(enum) {
     Semicolon,
     // caller owns the identifier, they must free this after using
     Identifier: []u8,
+    Create,
+    Table,
+    Lpar,
+    Rpar,
 };
 
 pub const TokenizeError = error{
@@ -17,6 +21,8 @@ pub const TokenizeError = error{
 };
 
 // caller owns the returned Token list
+// tokenizes a given SQL statement
+// NOTE: every identifier token is normalized to lower case ASCII
 pub fn tokenize(alloc: Allocator, input: []const u8) ![]Token {
     var tokens: std.ArrayList(Token) = .empty;
 
@@ -24,6 +30,14 @@ pub fn tokenize(alloc: Allocator, input: []const u8) ![]Token {
 
     while (i < input.len) {
         switch (input[i]) {
+            '(' => {
+                try tokens.append(alloc, Token.Lpar);
+                i += 1;
+            },
+            ')' => {
+                try tokens.append(alloc, Token.Rpar);
+                i += 1;
+            },
             '*' => {
                 try tokens.append(alloc, Token.Star);
                 i += 1;
@@ -59,6 +73,12 @@ pub fn tokenize(alloc: Allocator, input: []const u8) ![]Token {
                     } else if (std.mem.eql(u8, identifier, "from")) {
                         alloc.free(identifier);
                         try tokens.append(alloc, Token.From);
+                    } else if (std.mem.eql(u8, identifier, "create")) {
+                        alloc.free(identifier);
+                        try tokens.append(alloc, Token.Create);
+                    } else if (std.mem.eql(u8, identifier, "table")) {
+                        alloc.free(identifier);
+                        try tokens.append(alloc, Token.Table);
                     } else {
                         try tokens.append(alloc, .{ .Identifier = identifier });
                     }

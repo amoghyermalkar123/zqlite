@@ -1,7 +1,7 @@
 const std = @import("std");
 const token = @import("token.zig");
 const Token = token.Token;
-const ast = @import("ast.zig");
+const ast = @import("ast/ast.zig");
 const Allocator = std.mem.Allocator;
 
 pub const ParseError = error{
@@ -23,9 +23,49 @@ const ParserState = struct {
     }
 
     // parse_statement parses a sql statement
+    // cotrm
     fn parse_statement(self: *Self, alloc: Allocator) !ast.Statement {
+        const next = self.peek() orelse return error.UnexpectedEndOfInput;
+
+        if (std.mem.eql(u8, next, "select")) {
+            return .{
+                .Select = try self.parse_select(alloc),
+            };
+        }
+
+        if (std.mem.eql(u8, next, "create")) {
+            return .{
+                .CreateTable = try self.parse_create_table(alloc),
+            };
+        }
+
+        return error.UnexpectedToken;
+    }
+
+    // parses a create table statement
+    // cotrm
+    fn parse_create_table(self: *Self, alloc: Allocator) !ast.Create.CreateTableStatement {
+        self.expectNextTokenEq(Token.Create);
+        self.expectNextTokenEq(Token.Table);
+
+        const table_name = try self.expectIdentifier();
+        self.expectNextTokenEq(Token.Lpar);
+
+        var column_defs = try std.ArrayList(ast.Create.ColumnDef).initCapacity(alloc, 1);
+
+        const first_def = try self.parse_column_def();
+        try column_defs.append(alloc, first_def);
+
+        while (self.nextTokenIs(Token.Semicolon)) {
+            self.advance();
+            try column_defs.append(alloc, try self.parse_column_def());
+        }
+
+        self.expectNextTokenEq(Token.Rpar);
+
         return .{
-            .Select = try self.parse_select(alloc),
+            .name = table_name,
+            .cols = column_defs.toOwnedSlice(alloc),
         };
     }
 
@@ -116,8 +156,8 @@ const ParserState = struct {
         };
     }
 
-    // expectNextTokenEq asserts the whether the next token is the `expected`
-    // this consume the next token
+    /// expectNextTokenEq asserts the whether the next token is the `expected`
+    /// this consume the next token
     fn expectNextTokenEq(self: *Self, expected: Token) ParseError!Token {
         const tkn = self.nextToken() orelse return ParseError.UnexpectedEndOfInput;
         if (std.meta.eql(tkn, expected)) {
@@ -140,6 +180,33 @@ const ParserState = struct {
 
     fn advance(self: *Self) void {
         self.pos += 1;
+    }
+
+    fn parse_col_type(self: *Self) !ast.Create.Type {
+        const type_name = try self.expectIdentifier();
+        if (std.mem.eql(u8, type_name, "integer")) {
+            return ast.Create.Type.Integer;
+        } else if (std.mem.eql(u8, type_name, "text")) {
+            return ast.Create.Type.Text;
+        } else if (std.mem.eql(u8, type_name, "blob")) {
+            return ast.Create.Type.Blob;
+        } else if (std.mem.eql(u8, type_name, "string") or std.mem.eql(u8, type_name, "text")) {
+            return ast.Create.Type.Text;
+        } else {
+            return error.UnexpectedColumnType;
+        }
+    }
+
+    // parse a column definition statement which has a column name and it's
+    // respective column type, generally used as part of a CREATE TABLE
+    // statement
+    fn parse_column_def(self: *Self) !ast.Create.ColumnDef {
+        return .{
+            // order of fields matters here because first we want to parse the column name
+            // and then the column type
+            .name = self.expectIdentifier(),
+            .col_type = try self.parse_col_type(),
+        };
     }
 };
 
@@ -165,13 +232,27 @@ pub const ParseResult = struct {
     }
 };
 
-pub fn parse_statement(input: []const u8, alloc: Allocator) !ParseResult {
+pub fn parse_statement(input: []const u8, alloc: Allocator, trailing_semicolon: bool) !ParseResult {
     const tokens = try token.tokenize(alloc, input);
     var parser = ParserState.init(tokens);
     const statement = try parser.parse_statement(alloc);
-    _ = try parser.expectNextTokenEq(Token.Semicolon);
+    if (trailing_semicolon) {
+        parser.expectNextTokenEq(Token.Semicolon);
+    }
     return .{
         .statement = statement,
+        .tokens = tokens,
+        .alloc = alloc,
+    };
+}
+
+pub fn parse_create_statement(input: []const u8, alloc: Allocator) !ParseResult {
+    const tokens = try token.tokenize(alloc, input);
+    var parser = ParserState.init(tokens);
+    const statement = try parser.parse_create_table(alloc);
+
+    return .{
+        .statement = .{ .CreateTable = statement },
         .tokens = tokens,
         .alloc = alloc,
     };
