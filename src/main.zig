@@ -56,19 +56,8 @@ fn cli(io: Io, alloc: Allocator, dba: *db) !void {
     }
 }
 
-fn display_tables(alloc: Allocator, dba: *db) !void {
-    var scan = try dba.scanner(alloc, 1);
-    while (true) {
-        var rec = scan.next_record() catch |err| {
-            std.debug.print("end of scanner, exiting {any}\n", .{err});
-            break;
-        } orelse return;
-
-        const tv = try rec.field(1) orelse {
-            std.debug.print("missing name field", .{});
-            break;
-        };
-
-        std.debug.print("field: {s}\n", .{tv.String.str});
+fn display_tables(dba: *db) !void {
+    for (dba.tables_metadata) |tb| {
+        std.debug.print("field: {s}\n", .{tb.name});
     }
 }
