@@ -12,8 +12,20 @@ const sql = @import("parser/parser.zig");
 header: pg.DbHeader,
 pager: pgm,
 tables_metadata: []TableMetadata,
+alloc: Allocator,
 
 const Self = @This();
+
+pub fn deinit(self: *Self) void {
+    for (self.tables_metadata) |tm| {
+        self.alloc.free(tm.name);
+        for (tm.cols) |c| self.alloc.free(c.name);
+        self.alloc.free(tm.cols);
+    }
+
+    self.alloc.free(self.tables_metadata);
+    self.pager.deinit();
+}
 
 pub fn from_file(io: Io, alloc: Allocator, filename: []const u8) !Self {
     const f = try Io.Dir.openFileAbsolute(io, filename, .{ .mode = .read_write });
@@ -25,10 +37,13 @@ pub fn from_file(io: Io, alloc: Allocator, filename: []const u8) !Self {
 
     var pgmer = try pgm.new(alloc, io, f);
 
+    const tms = try Self.collect_table_metadata(&pgmer, alloc);
+
     return .{
+        .alloc = alloc,
         .pager = pgmer,
         .header = try pg.parse_header(&header_buffer),
-        .tables_metadata = try Self.collect_table_metadata(&pgmer, alloc),
+        .tables_metadata = tms,
     };
 }
 
@@ -77,6 +92,7 @@ pub const TableMetadata = struct {
 fn collect_table_metadata(pager: *pgm, alloc: Allocator) ![]TableMetadata {
     var metadata = try std.ArrayList(TableMetadata).initCapacity(alloc, 1);
     var scn = try Scanner.new(pager, alloc, 1);
+    defer scn.page_stack.deinit(alloc);
 
     var next = try scn.next_record();
     while (next != null) : ({

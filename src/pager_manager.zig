@@ -8,6 +8,7 @@ const Allocator = std.mem.Allocator;
 io: Io,
 f: Io.File,
 page_size: usize,
+bufs: std.AutoHashMap(usize, []u8),
 pages: std.AutoHashMap(usize, Page.Page),
 alloc: Allocator,
 
@@ -26,9 +27,32 @@ pub fn new(alloc: Allocator, io: Io, f: Io.File) !Self {
         .io = io,
         .f = f,
         .page_size = @intCast(header.page_size),
+        .bufs = .init(alloc),
         .pages = .init(alloc),
         .alloc = alloc,
     };
+}
+
+pub fn deinit(self: *Self) void {
+    var it = self.bufs.iterator();
+    while (it.next()) |entry| self.alloc.free(entry.value_ptr.*);
+    self.bufs.deinit();
+
+    var pit = self.pages.iterator();
+    while (pit.next()) |entry| {
+        switch (entry.value_ptr.*) {
+            .Interior => |*pg| {
+                self.alloc.free(pg.cell_pointers);
+                pg.cells.deinit(self.alloc);
+            },
+            .Leaf => |*pg| {
+                self.alloc.free(pg.cell_pointers);
+                pg.cells.deinit(self.alloc);
+            },
+        }
+    }
+
+    self.pages.deinit();
 }
 
 pub fn read_page(self: *Self, n: usize) !*const Page.Page {
@@ -51,7 +75,11 @@ fn load_page(self: *Self, n: usize) !Page.Page {
     const offset = page_index * self.page_size;
 
     const buffer = try self.alloc.alloc(u8, self.page_size);
-    errdefer self.alloc.free(buffer);
+    try self.bufs.put(n, buffer);
+    errdefer {
+        self.alloc.free(buffer);
+        _ = self.bufs.remove(n);
+    }
 
     var reader_buf: [1024]u8 = undefined;
     var file_reader = self.f.reader(self.io, &reader_buf);

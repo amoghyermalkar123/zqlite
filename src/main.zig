@@ -19,6 +19,8 @@ pub fn main(init: std.process.Init) !void {
     }
 
     var new_db = try db.from_file(io, alloc, args[1]);
+    defer new_db.deinit();
+
     try cli(io, alloc, &new_db);
 }
 
