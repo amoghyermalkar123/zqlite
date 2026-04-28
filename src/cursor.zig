@@ -2,6 +2,7 @@ const std = @import("std");
 const pg = @import("page.zig");
 const RecordHeader = @import("page.zig").RecordHeader;
 const Pager = @import("pager_manager.zig");
+const Allocator = std.mem.Allocator;
 
 pub const Value = union(enum) {
     Null,
@@ -18,6 +19,11 @@ pub const Cursor = struct {
     payload: []u8 = undefined,
 
     const Self = @This();
+
+    pub fn deinit(self: Cursor, alloc: Allocator) void {
+        alloc.free(self.payload);
+        alloc.free(self.header.fields);
+    }
 
     // given `n` returns back the nth gield in the record (i.e. row) if found
     // else returns null

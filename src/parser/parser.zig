@@ -230,7 +230,6 @@ pub const ParseResult = struct {
             .Select => |*sel| sel.core.result_columns.deinit(self.alloc),
             .CreateTable => |*crt| {
                 self.alloc.free(crt.cols);
-                self.alloc.free(crt.name);
             },
         }
     }
@@ -250,6 +249,7 @@ pub fn parse_statement(input: []const u8, alloc: Allocator, trailing_semicolon: 
     };
 }
 
+/// cotrm
 pub fn parse_create_statement(input: []const u8, alloc: Allocator) !ParseResult {
     const tokens = try token.tokenize(alloc, input);
     var parser = ParserState.init(tokens);

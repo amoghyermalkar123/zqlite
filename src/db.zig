@@ -48,13 +48,26 @@ pub const TableMetadata = struct {
 
         const create_stmt = try cur.field(4) orelse return error.MissingCreateStmt;
 
-        const create = try sql.parse_create_statement(create_stmt.String.str, alloc);
+        var create = try sql.parse_create_statement(create_stmt.String.str, alloc);
+        defer create.deinit();
+
+        const crt_stmt = create.statement.CreateTable;
+        const name = try alloc.dupe(u8, crt_stmt.name);
+        errdefer alloc.free(name);
+
+        const coldefs = try alloc.alloc(ast.Create.ColumnDef, crt_stmt.cols.len);
+        errdefer alloc.free(coldefs);
+
+        for (coldefs, crt_stmt.cols) |*l, r| {
+            l.name = try alloc.dupe(u8, r.name);
+            l.col_type = r.col_type;
+        }
 
         const first_page = try cur.field(3) orelse return error.MissingTableFirstPage;
 
         return TableMetadata{
-            .name = create.statement.CreateTable.name,
-            .cols = create.statement.CreateTable.cols,
+            .name = name,
+            .cols = coldefs,
             .first_page = @intCast(first_page.Int),
         };
     }
@@ -69,6 +82,7 @@ fn collect_table_metadata(pager: *pgm, alloc: Allocator) ![]TableMetadata {
     while (next != null) : ({
         next = try scn.next_record();
     }) {
+        defer next.?.deinit(alloc);
         try metadata.append(alloc, try TableMetadata.from_cursor(&next.?, alloc) orelse continue);
     }
 
