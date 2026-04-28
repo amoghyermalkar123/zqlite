@@ -38,13 +38,13 @@ pub fn scanner(self: *Self, alloc: Allocator, page_num: usize) !Scanner {
 
 pub const TableMetadata = struct {
     name: []const u8,
-    cols: ast.Create.ColumnDef,
+    cols: []ast.Create.ColumnDef,
     first_page: usize,
 
     fn from_cursor(cur: *cursor.Cursor, alloc: Allocator) !?TableMetadata {
         const tv = try cur.field(0) orelse return error.MissingTypeField;
 
-        if (std.mem.eql(u8, tv.String.str, "table")) return null;
+        if (!std.mem.eql(u8, tv.String.str, "table")) return null;
 
         const create_stmt = try cur.field(4) orelse return error.MissingCreateStmt;
 
@@ -55,7 +55,7 @@ pub const TableMetadata = struct {
         return TableMetadata{
             .name = create.statement.CreateTable.name,
             .cols = create.statement.CreateTable.cols,
-            .first_page = first_page.Int,
+            .first_page = @intCast(first_page.Int),
         };
     }
 };
@@ -63,13 +63,13 @@ pub const TableMetadata = struct {
 // cotrm
 fn collect_table_metadata(pager: *pgm, alloc: Allocator) ![]TableMetadata {
     var metadata = try std.ArrayList(TableMetadata).initCapacity(alloc, 1);
-    const scn = try Scanner.new(pager, alloc, 1);
+    var scn = try Scanner.new(pager, alloc, 1);
 
     var next = try scn.next_record();
     while (next != null) : ({
-        next = scn.next_record();
+        next = try scn.next_record();
     }) {
-        try metadata.append(alloc, TableMetadata.from_cursor(next.?, alloc) orelse continue);
+        try metadata.append(alloc, try TableMetadata.from_cursor(&next.?, alloc) orelse continue);
     }
 
     return metadata.toOwnedSlice(alloc);

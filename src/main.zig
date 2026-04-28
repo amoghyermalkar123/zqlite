@@ -46,9 +46,9 @@ fn cli(io: Io, alloc: Allocator, dba: *db) !void {
         if (std.mem.eql(u8, input, ".exit")) {
             break;
         } else if (std.mem.eql(u8, input, ".tables")) {
-            try display_tables(alloc, dba);
+            try display_tables(dba);
         } else {
-            var result = try sql.parse_statement(input, alloc);
+            var result = try sql.parse_statement(input, alloc, true);
             defer result.deinit();
             std.debug.print("sql: {any}\n", .{result.statement});
             try stdout.flush();

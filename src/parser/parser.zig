@@ -27,13 +27,13 @@ const ParserState = struct {
     fn parse_statement(self: *Self, alloc: Allocator) !ast.Statement {
         const next = self.peek() orelse return error.UnexpectedEndOfInput;
 
-        if (std.mem.eql(u8, next, "select")) {
+        if (next == Token.Select) {
             return .{
                 .Select = try self.parse_select(alloc),
             };
         }
 
-        if (std.mem.eql(u8, next, "create")) {
+        if (next == Token.Create) {
             return .{
                 .CreateTable = try self.parse_create_table(alloc),
             };
@@ -45,11 +45,11 @@ const ParserState = struct {
     // parses a create table statement
     // cotrm
     fn parse_create_table(self: *Self, alloc: Allocator) !ast.Create.CreateTableStatement {
-        self.expectNextTokenEq(Token.Create);
-        self.expectNextTokenEq(Token.Table);
+        _ = try self.expectNextTokenEq(Token.Create);
+        _ = try self.expectNextTokenEq(Token.Table);
 
         const table_name = try self.expectIdentifier();
-        self.expectNextTokenEq(Token.Lpar);
+        _ = try self.expectNextTokenEq(Token.Lpar);
 
         var column_defs = try std.ArrayList(ast.Create.ColumnDef).initCapacity(alloc, 1);
 
@@ -61,11 +61,11 @@ const ParserState = struct {
             try column_defs.append(alloc, try self.parse_column_def());
         }
 
-        self.expectNextTokenEq(Token.Rpar);
+        _ = try self.expectNextTokenEq(Token.Rpar);
 
         return .{
             .name = table_name,
-            .cols = column_defs.toOwnedSlice(alloc),
+            .cols = try column_defs.toOwnedSlice(alloc),
         };
     }
 
@@ -204,7 +204,7 @@ const ParserState = struct {
         return .{
             // order of fields matters here because first we want to parse the column name
             // and then the column type
-            .name = self.expectIdentifier(),
+            .name = try self.expectIdentifier(),
             .col_type = try self.parse_col_type(),
         };
     }
@@ -228,6 +228,10 @@ pub const ParseResult = struct {
         // Free the result_columns ArrayList
         switch (self.statement) {
             .Select => |*sel| sel.core.result_columns.deinit(self.alloc),
+            .CreateTable => |*crt| {
+                self.alloc.free(crt.cols);
+                self.alloc.free(crt.name);
+            },
         }
     }
 };
@@ -237,7 +241,7 @@ pub fn parse_statement(input: []const u8, alloc: Allocator, trailing_semicolon: 
     var parser = ParserState.init(tokens);
     const statement = try parser.parse_statement(alloc);
     if (trailing_semicolon) {
-        parser.expectNextTokenEq(Token.Semicolon);
+        _ = try parser.expectNextTokenEq(Token.Semicolon);
     }
     return .{
         .statement = statement,

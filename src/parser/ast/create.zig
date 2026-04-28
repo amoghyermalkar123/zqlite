@@ -8,7 +8,7 @@ pub const Type = enum {
     Blob,
 };
 
-pub const ColumnDef = union(enum) {
+pub const ColumnDef = struct {
     name: []const u8,
     col_type: Type,
 };
