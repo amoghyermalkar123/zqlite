@@ -237,6 +237,15 @@ pub const ParseResult = struct {
 
 pub fn parse_statement(input: []const u8, alloc: Allocator, trailing_semicolon: bool) !ParseResult {
     const tokens = try token.tokenize(alloc, input);
+    errdefer {
+        for (tokens) |tk| {
+            switch (tk) {
+                .Identifier => |idn| alloc.free(idn),
+                else => {},
+            }
+        }
+        alloc.free(tokens);
+    }
     var parser = ParserState.init(tokens);
     const statement = try parser.parse_statement(alloc);
     if (trailing_semicolon) {
