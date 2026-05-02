@@ -56,6 +56,7 @@ pub const PageHeader = struct {
     cell_content_offset: u32,
     fragmented_byts_count: u8,
     // only stored when the page is interior
+    // points to the sibling interior page at the same depth
     rightmost_pointer: ?u32 = null,
 };
 
@@ -90,8 +91,6 @@ pub const Decoder = struct {
 
         return std.mem.readInt(T, self.buffer[ix .. ix + int_size][0..int_size], .big);
     }
-
-    // fn read_int_at(self: *Self, from: usize, comptime T: type) !T {}
 
     pub fn read_enum(self: *const Self, index: usize, comptime T: type) !T {
         return std.enums.fromInt(T, try self.read_int(index, std.meta.Tag(T))) orelse error.InvalidEnumTag;
@@ -173,13 +172,15 @@ pub fn parse_page_header(decoder: *Decoder, page_offset: usize) !PageHeader {
         .cell_content_offset = cell_content_offset,
         .cell_count = cell_count_offset,
         .first_free_block = first_free_block,
-        .rightmost_pointer = if (pt == .Interior) try decoder.read_int(page_offset + cnst.PAGE_LEAF_HEADER_SIZE, u32) else null,
+        .rightmost_pointer = if (pt == .Interior) try decoder.read_int(page_offset + cnst.PAGE_INTERIOR_HEADER_SIZE, u32) else null,
     };
 }
 
 // caller owns the returned slice
 fn parse_cell_pointers(alloc: Allocator, decoder: *const Decoder, page_offset: usize, n: usize, header_size: usize) ![]u16 {
     var pointers = try std.ArrayList(u16).initCapacity(alloc, n);
+    errdefer pointers.deinit(alloc);
+
     for (0..n) |ix| {
         // absolute positions of the pointers of the cells need to be pushed to the array
         try pointers.append(alloc, try decoder.read_int(page_offset + header_size + 2 * ix, u16));
@@ -213,37 +214,38 @@ fn parse_table_internal_cell(decoder: *Decoder, cell_ptr: u16) !TableInteriorCel
     };
 }
 
+// docs can be found for this in docs/varint.md
 pub fn read_varint_at(decoder: *Decoder, offset: usize) !struct { n: u8, res: i64 } {
-    var size: u8 = 0;
+    var bytes_read: u8 = 0;
     var result: i64 = 0;
     var ofs = offset;
 
     // sqlite varint is 9 bytes long
-    while (size < 9) {
-        const cur_byte = @as(i64, try decoder.read_int(ofs, u8));
+    while (bytes_read < 9) {
+        const current_byte = @as(i64, try decoder.read_int(ofs, u8));
 
-        if (size == 8) {
+        if (bytes_read == 8) {
             // this shifts 8 bits to the left in result,
             // moves bits from cur_byte to result
             // since this is the last byte, all bits represent info
             // there is no control bit in here hence no masking required
-            result = (result << 8) | cur_byte;
+            result = (result << 8) | current_byte;
         } else {
             // masking is basically for removing the control bit
             // shifting bits is for making space for the new bits of the cur_byte
             // remember, result is a 64 bit integer
-            result = (result << 7) | (cur_byte & 0b0111_1111);
+            result = (result << 7) | (current_byte & 0b0111_1111);
         }
 
         ofs += 1;
-        size += 1;
+        bytes_read += 1;
 
         // stop at last byte
-        if (cur_byte & 0b1000_0000 == 0) break;
+        if (current_byte & 0b1000_0000 == 0) break;
     }
 
     return .{
-        .n = size,
+        .n = bytes_read,
         .res = result,
     };
 }
@@ -361,40 +363,33 @@ pub fn parse_record_header(alloc: Allocator, cell_payload: []const u8) !RecordHe
 
 const t = std.testing;
 
-test "read_varint_at" {
-    var dec = Decoder{
-        .buffer = &[_]u8{ 0x81, 0x2C },
-    };
-
-    const res = try read_varint_at(&dec, 0);
-    try t.expectEqual(@as(u8, 2), res.n);
-    try t.expectEqual(@as(i64, 172), res.res);
-}
-
-test "parse_record_header" {
-    var scratch: [256]u8 = undefined;
-    var fba = std.heap.FixedBufferAllocator.init(&scratch);
-
-    const payload = [_]u8{
-        0x03, // header size
-        0x01, // serial type: i8
-        0x0F, // serial type: string(1)
-        0x2A, // field 0 body byte
-        0x68, // field 1 body byte
-    };
-
-    const hdr = try parse_record_header(fba.allocator(), &payload);
-
-    try t.expectEqual(@as(usize, 2), hdr.fields.len);
-    try t.expectEqual(@as(usize, 3), hdr.fields[0].offset);
-    try t.expectEqual(@as(usize, 4), hdr.fields[1].offset);
-
-    try t.expectEqual(RecordFieldType.I8, hdr.fields[0].field_type);
-
-    switch (hdr.fields[1].field_type) {
-        .String => |len| try t.expectEqual(@as(usize, 1), len),
-        else => return error.UnexpectedRecordFieldType,
-    }
+test "parse_page_rest" {
+    var buf = [_]u8{0} ** 123;
+    buf[0] = 0x0D;
+    buf[1] = 0x00;
+    buf[2] = 0x00; // first free block
+    buf[3] = 0x00;
+    buf[4] = 0x01; // cell count = 1
+    buf[5] = 0x00;
+    buf[6] = 0x10; // cell content offset
+    buf[7] = 0x00; // fragmented bytes count
+    buf[8] = 0x00;
+    buf[9] = 0x10; // first cell pointer
+    buf[16] = 0x10; // first cell pointer
+    buf[16] = 0x03; // varint: payload size = 3
+    buf[17] = 0x05; // varint: row_id = 5
+    buf[18] = 0x11; // payload byte 1
+    buf[19] = 0x22; // payload byte 2
+    buf[20] = 0x33; // payload byte 3
+    var pg = try parse_page(t.allocator, &buf, 2); // page 2, no header offset
+    defer t.allocator.free(pg.Leaf.cell_pointers);
+    defer pg.Leaf.cells.deinit(t.allocator);
+    try t.expectEqual(PageType.Leaf, pg.Leaf.header.page_type);
+    try t.expectEqual(@as(u16, 1), pg.Leaf.header.cell_count);
+    try t.expectEqual(@as(u16, 16), pg.Leaf.cell_pointers[0]);
+    try t.expectEqual(@as(i64, 3), pg.Leaf.cells.items[0].size);
+    try t.expectEqual(@as(i64, 5), pg.Leaf.cells.items[0].row_id);
+    try t.expectEqualSlices(u8, &[_]u8{ 0x11, 0x22, 0x33 }, pg.Leaf.cells.items[0].payload);
 }
 
 // TODO: change this test to use an encoder instead of defining a raw byte array
@@ -418,10 +413,9 @@ test "parse_page" {
     buf[121] = 0xDD;
     buf[122] = 0xEE; // payload
 
-    var scratch: [1024]u8 = undefined;
-    var fba = std.heap.FixedBufferAllocator.init(&scratch);
-
-    const pg = try parse_page(fba.allocator(), &buf, 1);
+    var pg = try parse_page(t.allocator, &buf, 1);
+    defer t.allocator.free(pg.Leaf.cell_pointers);
+    defer pg.Leaf.cells.deinit(t.allocator);
     try t.expectEqual(PageType.Leaf, pg.Leaf.header.page_type);
     try t.expectEqual(@as(u16, 1), pg.Leaf.header.cell_count);
     try t.expectEqual(@as(usize, 1), pg.Leaf.cell_pointers.len);

@@ -4,12 +4,56 @@ const RecordHeader = @import("page.zig").RecordHeader;
 const Pager = @import("pager_manager.zig");
 const Allocator = std.mem.Allocator;
 
+// strings are borrowed from page payload
 pub const Value = union(enum) {
     Null,
     String: struct { str: []const u8 },
     Blob: struct { str: []const u8 },
     Int: i64,
     Float: f64,
+};
+
+// Owns the underlying slices
+pub const OwnedValue = struct {
+    alloc: Allocator,
+    value: Value,
+
+    pub fn from(alloc: Allocator, v: Value) !OwnedValue {
+        switch (v) {
+            .String => |tk| {
+                return OwnedValue{
+                    .alloc = alloc,
+                    .value = .{
+                        .String = .{
+                            .str = try alloc.dupe(u8, tk.str),
+                        },
+                    },
+                };
+            },
+            .Blob => |tk| {
+                return OwnedValue{
+                    .alloc = alloc,
+                    .value = .{
+                        .Blob = .{
+                            .str = try alloc.dupe(u8, tk.str),
+                        },
+                    },
+                };
+            },
+            else => return OwnedValue{
+                .alloc = alloc,
+                .value = v,
+            },
+        }
+    }
+
+    pub fn deinit(self: *OwnedValue) void {
+        switch (self.*.value) {
+            .String => |tk| self.alloc.free(tk.str),
+            .Blob => |tk| self.alloc.free(tk.str),
+            else => return,
+        }
+    }
 };
 
 // Uniquely indentifies a single record
