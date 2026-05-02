@@ -24,14 +24,21 @@ pub const SeqScan = struct {
     pub fn deinit(self: *Self) void {
         for (self.row_buffer.items) |*ov| ov.deinit();
         self.row_buffer.deinit(self.alloc);
+        self.scanner.page_stack.deinit(self.alloc);
+        self.alloc.free(self.fields);
     }
 
     pub fn next_row(self: *Self) !?[]const OwnedValue {
         var rec = try self.scanner.next_record() orelse return null;
         defer rec.deinit(self.alloc);
 
-        for (self.fields, 0..) |f, ix| {
-            self.row_buffer.items[ix] = try OwnedValue.from(self.alloc, try rec.field(f) orelse return error.MissingRecordField);
+        // Free previous row values and clear buffer
+        for (self.row_buffer.items) |*ov| ov.deinit();
+        self.row_buffer.clearRetainingCapacity();
+
+        for (self.fields) |f| {
+            const val = try rec.field(f) orelse return error.MissingRecordField;
+            self.row_buffer.appendAssumeCapacity(try OwnedValue.from(self.alloc, val));
         }
 
         return self.row_buffer.items;

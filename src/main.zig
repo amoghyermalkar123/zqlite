@@ -66,9 +66,13 @@ fn display_tables(dba: *db) !void {
 }
 
 fn eval_query(dba: *db, query: []const u8, alloc: Allocator) !void {
-    const parsed_query = try sql.parse_statement(query, alloc, false);
+    var parsed_query = try sql.parse_statement(query, alloc, false);
+    defer parsed_query.deinit();
+
     var en = engine.Planner.new(dba, alloc);
     var oper = try en.compile(parsed_query.statement);
+    defer oper.deinit();
+
     while (try oper.next_row()) |row| {
         for (row, 0..) |ov, i| {
             if (i > 0) std.debug.print(" | ", .{});

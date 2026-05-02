@@ -15,4 +15,4 @@ pub const PAGE_FIRST_FREEBLOCK_OFFSET: usize = 1;
 pub const PAGE_CELL_COUNT_OFFSET: usize = 3;
 pub const PAGE_CELL_CONTENT_OFFSET: usize = 5;
 pub const PAGE_FRAGMENTED_BYTES_COUNT_OFFSET: usize = 7;
-pub const RIGHTMOST_POINTER_OFFSET: usize = 9;
+pub const RIGHTMOST_POINTER_OFFSET: usize = 8;

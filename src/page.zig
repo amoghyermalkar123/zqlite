@@ -172,7 +172,7 @@ pub fn parse_page_header(decoder: *Decoder, page_offset: usize) !PageHeader {
         .cell_content_offset = cell_content_offset,
         .cell_count = cell_count_offset,
         .first_free_block = first_free_block,
-        .rightmost_pointer = if (pt == .Interior) try decoder.read_int(page_offset + cnst.PAGE_INTERIOR_HEADER_SIZE, u32) else null,
+        .rightmost_pointer = if (pt == .Interior) try decoder.read_int(page_offset + cnst.PAGE_LEAF_HEADER_SIZE, u32) else null,
     };
 }
 
