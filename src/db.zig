@@ -17,12 +17,7 @@ alloc: Allocator,
 const Self = @This();
 
 pub fn deinit(self: *Self) void {
-    for (self.tables_metadata) |tm| {
-        self.alloc.free(tm.name);
-        for (tm.cols) |c| self.alloc.free(c.name);
-        self.alloc.free(tm.cols);
-    }
-
+    for (self.tables_metadata) |tm| freeTableMetadata(self.alloc, tm);
     self.alloc.free(self.tables_metadata);
     self.pager.deinit();
 }
@@ -36,6 +31,7 @@ pub fn from_file(io: Io, alloc: Allocator, filename: []const u8) !Self {
     try file_reader.interface.readSliceAll(&header_buffer);
 
     var pgmer = try pgm.new(alloc, io, f);
+    errdefer pgmer.deinit();
 
     const tms = try Self.collect_table_metadata(&pgmer, alloc);
 
@@ -73,9 +69,13 @@ pub const TableMetadata = struct {
         const coldefs = try alloc.alloc(ast.Create.ColumnDef, crt_stmt.cols.len);
         errdefer alloc.free(coldefs);
 
+        var cols_initialized: usize = 0;
+        errdefer for (coldefs[0..cols_initialized]) |c| alloc.free(c.name);
+
         for (coldefs, crt_stmt.cols) |*l, r| {
             l.name = try alloc.dupe(u8, r.name);
             l.col_type = r.col_type;
+            cols_initialized += 1;
         }
 
         const first_page = try cur.field(3) orelse return error.MissingTableFirstPage;
@@ -88,9 +88,20 @@ pub const TableMetadata = struct {
     }
 };
 
+fn freeTableMetadata(alloc: Allocator, tm: TableMetadata) void {
+    alloc.free(tm.name);
+    for (tm.cols) |c| alloc.free(c.name);
+    alloc.free(tm.cols);
+}
+
 // cotrm
 fn collect_table_metadata(pager: *pgm, alloc: Allocator) ![]TableMetadata {
     var metadata = try std.ArrayList(TableMetadata).initCapacity(alloc, 1);
+    errdefer {
+        for (metadata.items) |tm| freeTableMetadata(alloc, tm);
+        metadata.deinit(alloc);
+    }
+
     var scn = try Scanner.new(pager, alloc, 1);
     defer scn.page_stack.deinit(alloc);
 
