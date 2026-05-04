@@ -1,3 +1,6 @@
+//! Scanner is an iterator of elements
+//! it incrementally yields the next page or the next cell
+//! relies on positioned page and cursor implementation
 const std = @import("std");
 const pg = @import("page.zig");
 const RecordHeader = @import("page.zig").RecordHeader;
@@ -57,28 +60,33 @@ pub const ScannedElement = union(enum) {
 };
 
 fn next_element(self: *Self) !?ScannedElement {
+    // read the current page
     const pe = try self.current_page();
 
+    // check if we have next page
     const nextpe = try pe.next_page();
 
+    // if we do, return the page
     if (nextpe != null) return ScannedElement{ .Page = nextpe.? };
 
+    // if we dont have next page we go to the next cell
     const cell = try pe.next_cell() orelse return null;
 
     switch (cell) {
+        // if current page is interior return the child page in the next depth that this cell points to
         .Interior => |c| {
             return ScannedElement{
                 .Page = c.left_child_page,
             };
         },
-
+        // if current page is leaf, return the currently read leaf cell
         .Leaf => |c| {
             const header = try pg.parse_record_header(self.alloc, c.payload);
 
             return ScannedElement{
                 .Cursor = .{
                     .payload = try self.alloc.dupe(u8, c.payload),
-                    .header = header,
+                    .record_header = header,
                 },
             };
         },
