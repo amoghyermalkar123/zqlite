@@ -25,6 +25,9 @@ pub fn deinit(self: *Self) void {
 pub fn from_file(io: Io, alloc: Allocator, filename: []const u8) !Self {
     const f = try Io.Dir.openFileAbsolute(io, filename, .{ .mode = .read_write });
 
+    // This is reading the database header. Actual page layouts
+    // start after the database header.
+    // This contains the metadata about the entire database
     var header_buffer: [cnst.HEADER_SIZE]u8 = undefined;
     var reader_buf: [256]u8 = undefined;
     var file_reader = f.reader(io, &reader_buf);
@@ -69,13 +72,11 @@ pub const TableMetadata = struct {
         const coldefs = try alloc.alloc(ast.Create.ColumnDef, crt_stmt.cols.len);
         errdefer alloc.free(coldefs);
 
-        var cols_initialized: usize = 0;
-        errdefer for (coldefs[0..cols_initialized]) |c| alloc.free(c.name);
+        errdefer for (coldefs) |c| alloc.free(c.name);
 
         for (coldefs, crt_stmt.cols) |*l, r| {
             l.name = try alloc.dupe(u8, r.name);
             l.col_type = r.col_type;
-            cols_initialized += 1;
         }
 
         const first_page = try cur.field(3) orelse return error.MissingTableFirstPage;

@@ -58,23 +58,24 @@ pub const OwnedValue = struct {
 
 // Uniquely indentifies a single record
 // it is a cursor over a cell in a leaf page
+// a record is a cell basically
 pub const Cursor = struct {
-    header: RecordHeader,
+    record_header: RecordHeader,
     payload: []u8 = undefined,
 
     const Self = @This();
 
     pub fn deinit(self: Cursor, alloc: Allocator) void {
         alloc.free(self.payload);
-        alloc.free(self.header.fields);
+        alloc.free(self.record_header.fields);
     }
 
     // given `n` returns back the nth gield in the record (i.e. row) if found
     // else returns null
     pub fn field(self: *Self, n: usize) !?Value {
-        if (n >= self.header.fields.len) return error.InvalidIndex;
+        if (n >= self.record_header.fields.len) return error.InvalidIndex;
 
-        const record_field = self.header.fields[n];
+        const record_field = self.record_header.fields[n];
         var decoder = pg.Decoder{ .buffer = self.payload };
 
         switch (record_field.field_type) {
@@ -157,7 +158,7 @@ test "Cursor.field decodes integer and string fields from cached page" {
     };
 
     var cursor = Cursor{
-        .header = header,
+        .record_header = header,
         .pager = &pager,
         .page_index = 1,
         .page_cell = 0,
