@@ -19,6 +19,7 @@ pub fn parse_header(buffer: []const u8) !DbHeader {
         return error.InvalidHeaderPrefix;
     }
 
+    // read 2 bytes which represent the sizes of the pages.
     const page_size_raw = std.mem.readInt(u16, buffer[cnst.HEADER_PAGE_SIZE_OFFSET..][0..cnst.HEADER_PAGE_SIZE_SIZE], .big);
     // page_size 1 is used to indicate max page size
     return DbHeader{
@@ -241,6 +242,7 @@ pub fn read_varint_at(decoder: *Decoder, offset: usize) !struct { n: u8, res: i6
         bytes_read += 1;
 
         // stop at last byte
+        // this is indicated by the continuation bit being set to 0
         if (current_byte & 0b1000_0000 == 0) break;
     }
 
@@ -274,56 +276,55 @@ pub const RecordHeader = struct {
     fields: []RecordField,
 };
 
-/// SQLite record payload layout:
-///
-/// |<----------- record header ----------->|<------ record body ------>|
-/// | header_size varint | serial type ...  | field 0 bytes | field ... |
-///
-/// Example payload:
-///
-///   [03] [01] [0F] [2A] [68]
-///    |    |    |    |    |
-///    |    |    |    |    field 1 body byte
-///    |    |    |    field 0 body byte
-///    |    |    serial type for field 1
-///    |    serial type for field 0
-///    header_size varint
-///
-/// For that example:
-///
-/// - `header_size = 3`, so header bytes are `[03][01][0F]`
-/// - body starts at byte offset `3`
-/// - serial type `1` maps to `I8`, so field 0 starts at offset `3`
-/// - serial type `15` maps to `String(1)`, so field 1 starts at offset `4`
-///
-/// Cursor meaning inside this function:
-///
-/// - `buffer_cur` walks serial-type varints inside the header
-/// - `field_payl_cur` walks field data inside the body
-///
-/// Final parsed header for the example:
-///
-///   fields = [
-///     { offset = 3, field_type = I8 },
-///     { offset = 4, field_type = String(1) },
-///   ]
-///
-// returns a parsed `RecordHeader`, the caller owns `fields memory`
+// SQLite Record Format (cell payload)
+// ====================================
+//
+// +------------------+------------------+-----+------------------+------------------+-----+------------------+
+// |   Header Size    |   Type Code 1    | ... |   Type Code N    |   Field Data 1   | ... |   Field Data N   |
+// |    (varint)      |    (varint)      |     |    (varint)      |   (variable)     |     |   (variable)     |
+// +------------------+------------------+-----+------------------+------------------+-----+------------------+
+// |<------------------- Header (header_size bytes) ------------->|<---------- Payload Data ------------>|
+//
+// Header Size: Total bytes in header including this varint
+// Type Codes:  Discriminators that encode field type and size:
+//              0       -> NULL
+//              1       -> 8-bit signed int
+//              2       -> 16-bit signed int (big-endian)
+//              3       -> 24-bit signed int (big-endian)
+//              4       -> 32-bit signed int (big-endian)
+//              5       -> 48-bit signed int (big-endian)
+//              6       -> 64-bit signed int (big-endian)
+//              7       -> 64-bit IEEE float (big-endian)
+//              8       -> Integer constant 0
+//              9       -> Integer constant 1
+//              >=12 even -> BLOB of size (N-12)/2
+//              >=13 odd  -> String of size (N-13)/2
+//
 pub fn parse_record_header(alloc: Allocator, cell_payload: []const u8) !RecordHeader {
     var decoder = Decoder{ .buffer = cell_payload };
-
+    // let's read the record header
     const header_data = try read_varint_at(&decoder, 0);
+    // byte width of the `Header Size` varint itself
+    // the value of this is the starting offset in the header buffer
+    // from where we can start reading the type code values
+    var record_header_cursor = header_data.n;
+    // this gives us the entire length of the record header
+    // the value of this is the starting offset from where
+    // we can start reading the field data i.e. the actual
+    // fields payload
+    var field_payload_cursor: usize = @intCast(header_data.res);
 
     var fields = try std.ArrayList(RecordField).initCapacity(alloc, 10);
     errdefer fields.deinit(alloc);
 
-    var buffer_cur = header_data.n;
-    var field_payl_cur: usize = @intCast(header_data.res);
-
-    while (@as(i64, buffer_cur) < header_data.res) {
-        const discr_data = try read_varint_at(&decoder, buffer_cur);
-        buffer_cur += discr_data.n;
-
+    while (@as(i64, record_header_cursor) < header_data.res) {
+        // we read the discriminant here, i.e. the field information
+        // stored in the record header
+        const discr_data = try read_varint_at(&decoder, record_header_cursor);
+        // the size of the header bytes read, this is the value
+        // we advance our record header cursor by
+        record_header_cursor += discr_data.n;
+        // now parse the actual type of the field as indicated by the value of the type code we just read
         const field_data: struct { field_type: RecordFieldType, field_size: usize } = switch (discr_data.res) {
             0 => .{ .field_type = RecordFieldType.Null, .field_size = 0 },
             1 => .{ .field_type = RecordFieldType.I8, .field_size = 1 },
@@ -352,10 +353,13 @@ pub fn parse_record_header(alloc: Allocator, cell_payload: []const u8) !RecordHe
 
         try fields.append(alloc, .{
             .field_type = field_data.field_type,
-            .offset = field_payl_cur,
+            .offset = field_payload_cursor,
         });
 
-        field_payl_cur += field_data.field_size;
+        // we've decoded the field, now since the types of the field are a great
+        // way to understand their sizes, we can advance the field payload cursor
+        // by the size of the type of the field i.e. 1 for I8, 2 for I16, etc.
+        field_payload_cursor += field_data.field_size;
     }
 
     return .{ .fields = try fields.toOwnedSlice(alloc) };
