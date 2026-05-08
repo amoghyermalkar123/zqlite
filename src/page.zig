@@ -1,13 +1,22 @@
 //! Page is a unit of I/O in zsqlite
 //! when stored in the file, they are stored at 0-based offsets
 //! but represented as 1 based
-
 const std = @import("std");
 const cnst = @import("constants.zig");
 const Allocator = std.mem.Allocator;
 
+pub const OverflowPage = struct {
+    next: ?usize,
+    payload: []u8,
+};
+
 pub const DbHeader = struct {
     page_size: u32,
+    page_reserved_size: u8,
+
+    pub fn usable_page_size(self: DbHeader) usize {
+        return @as(usize, self.page_size) - @as(usize, self.page_reserved_size);
+    }
 };
 
 pub fn parse_header(buffer: []const u8) !DbHeader {
@@ -21,9 +30,11 @@ pub fn parse_header(buffer: []const u8) !DbHeader {
 
     // read 2 bytes which represent the sizes of the pages.
     const page_size_raw = std.mem.readInt(u16, buffer[cnst.HEADER_PAGE_SIZE_OFFSET..][0..cnst.HEADER_PAGE_SIZE_SIZE], .big);
+
     // page_size 1 is used to indicate max page size
     return DbHeader{
         .page_size = if (page_size_raw == 1) cnst.PAGE_MAX_SIZE else if (page_size_raw & (page_size_raw - 1) == 0 and page_size_raw != 0) page_size_raw else return error.InvalidPageSize,
+        .page_reserved_size = buffer[cnst.HEADER_PAGE_RESERVED_SIZE_OFFSET],
     };
 }
 
@@ -49,7 +60,8 @@ pub const TableInteriorPage = struct {
     cells: std.ArrayList(TableInteriorCell),
 };
 
-// Page header contains metadata
+// Page header contains metadata about a page
+// it's generic and represents both internal and leaf pages
 pub const PageHeader = struct {
     page_type: PageType,
     first_free_block: u16,
@@ -59,6 +71,40 @@ pub const PageHeader = struct {
     // only stored when the page is interior
     // points to the sibling interior page at the same depth
     rightmost_pointer: ?u32 = null,
+
+    /// Compute local payload size
+    pub fn local_payload_size(self: *const @This(), db_header: DbHeader, payload_size: usize) !usize {
+        switch (self.page_type) {
+            .Interior => return error.NoPayloadSizeForInteriorPage,
+            .Leaf => {
+                // NOTE: The FORMULAS used here are verbatim from the followed article which are picked
+                // from the sqlite source code. As of writing this  (6.5.26) I have yet to make
+                // sense of the `why` of these formulas
+                const usable = db_header.usable_page_size();
+                // X = U - 35, which is the overflow threshold: if the payload size
+                // is less than or equal to X it will be stored entirely in a B-tree leaf cell,
+                // without overflow
+                const max_size = usable - 35;
+                if (payload_size <= max_size) return payload_size;
+                // M = ((U-12)*32/255)-23, the minimum local payload size
+                const min_size = ((usable - 12) * 32 / 255) - 23;
+                // the maximum local payload size
+                const k = min_size + @as(usize, @mod(payload_size - min_size, usable - 4));
+                // return final size
+                return if (k <= max_size) k else min_size;
+            },
+        }
+    }
+
+    pub fn local_and_overflow_size(self: *const @This(), db_header: DbHeader, payload_size: usize) !struct { usize, ?usize } {
+        const local = try self.local_payload_size(db_header, payload_size);
+
+        if (local == payload_size) {
+            return .{ local, null };
+        }
+
+        return .{ local, payload_size -| local };
+    }
 };
 
 // An Actual cell which contains the data
@@ -66,6 +112,7 @@ pub const TableLeafCell = struct {
     size: i64,
     row_id: i64,
     payload: []const u8,
+    first_overflow: ?usize,
 };
 
 // a cell which holds tuple data which points to the next subtree containing the key
@@ -103,7 +150,18 @@ pub const Decoder = struct {
     }
 };
 
-pub fn parse_page(alloc: Allocator, buffer: []const u8, page_num: usize) !Page {
+pub fn parse_overflow_page(alloc: Allocator, buffer: []const u8) !OverflowPage {
+    const next_raw = std.mem.readInt(u32, buffer[0..4], .big);
+
+    const payload = try alloc.dupe(u8, buffer[4..]);
+
+    return OverflowPage{
+        .payload = payload,
+        .next = if (next_raw != 0) @as(usize, next_raw) else null,
+    };
+}
+
+pub fn parse_page(alloc: Allocator, buffer: []const u8, page_num: usize, db_header: *const DbHeader) !Page {
     const page_offset = if (page_num == 1) cnst.HEADER_SIZE else 0;
 
     var decoder = Decoder{ .buffer = buffer };
@@ -112,10 +170,10 @@ pub fn parse_page(alloc: Allocator, buffer: []const u8, page_num: usize) !Page {
 
     if (pt != .Leaf and pt != .Interior) return error.UnknownPageType;
 
-    return parse_table_leaf_page(alloc, &decoder, page_offset);
+    return parse_table_leaf_page(alloc, &decoder, page_offset, db_header);
 }
 
-fn parse_table_leaf_page(alloc: Allocator, decoder: *Decoder, page_offset: usize) !Page {
+fn parse_table_leaf_page(alloc: Allocator, decoder: *Decoder, page_offset: usize, db_header: *const DbHeader) !Page {
     const pg_hdr = try parse_page_header(decoder, page_offset);
     // parse cell pointers
     const cell_pointers = try parse_cell_pointers(alloc, decoder, page_offset, pg_hdr.cell_count, switch (pg_hdr.page_type) {
@@ -128,7 +186,7 @@ fn parse_table_leaf_page(alloc: Allocator, decoder: *Decoder, page_offset: usize
         .Leaf => {
             var cells = try std.ArrayList(TableLeafCell).initCapacity(alloc, cell_pointers.len);
             for (cell_pointers) |cell_ptr| {
-                try cells.append(alloc, try parse_table_leaf_cell(decoder, cell_ptr));
+                try cells.append(alloc, try parse_table_leaf_cell(decoder, cell_ptr, db_header, &pg_hdr));
             }
 
             return Page{
@@ -190,18 +248,29 @@ fn parse_cell_pointers(alloc: Allocator, decoder: *const Decoder, page_offset: u
     return pointers.toOwnedSlice(alloc);
 }
 
-fn parse_table_leaf_cell(decoder: *Decoder, cell_ptr: u16) !TableLeafCell {
+fn parse_table_leaf_cell(decoder: *Decoder, cell_ptr: u16, db_header: *const DbHeader, page_header: *const PageHeader) !TableLeafCell {
     const size_result = try read_varint_at(decoder, cell_ptr);
     const row_id_offset = cell_ptr + size_result.n;
     const row_id_result = try read_varint_at(decoder, row_id_offset);
     const payload_offset = row_id_offset + row_id_result.n;
-    // payload starts from payload_offset and payload length is in size_result.res
-    const payload = try decoder.read_slice(payload_offset, @intCast(size_result.res));
+
+    const sizes = try page_header.local_and_overflow_size(db_header.*, @intCast(size_result.res));
+    const local_size = sizes[0];
+    const overflow_size = sizes[1];
+
+    const payload = try decoder.read_slice(payload_offset, local_size);
+
+    // pointer to the first overflow page
+    const first_overflow = if (overflow_size != null)
+        @as(usize, try decoder.read_int(payload_offset + local_size, u32))
+    else
+        null;
 
     return TableLeafCell{
         .payload = payload,
         .row_id = row_id_result.res,
         .size = size_result.res,
+        .first_overflow = first_overflow,
     };
 }
 
@@ -270,6 +339,25 @@ pub const RecordFieldType = union(enum) {
 pub const RecordField = struct {
     offset: usize,
     field_type: RecordFieldType,
+
+    pub fn end_offset(self: RecordField) usize {
+        const size: usize = switch (self.field_type) {
+            .Null => 0,
+            .I8 => 1,
+            .I16 => 2,
+            .I24 => 3,
+            .I32 => 4,
+            .I48 => 5,
+            .I64 => 8,
+            .Float => 8,
+            .Zero => 0,
+            .One => 0,
+            .String => |n| n,
+            .Blob => |n| n,
+        };
+
+        return self.offset + size;
+    }
 };
 
 pub const RecordHeader = struct {
@@ -367,8 +455,14 @@ pub fn parse_record_header(alloc: Allocator, cell_payload: []const u8) !RecordHe
 
 const t = std.testing;
 
+fn page_encoder() []const u8 {}
+
 test "parse_page_rest" {
     var buf = [_]u8{0} ** 123;
+    const db_header = DbHeader{
+        .page_size = 4096,
+        .page_reserved_size = 0,
+    };
     buf[0] = 0x0D;
     buf[1] = 0x00;
     buf[2] = 0x00; // first free block
@@ -385,7 +479,7 @@ test "parse_page_rest" {
     buf[18] = 0x11; // payload byte 1
     buf[19] = 0x22; // payload byte 2
     buf[20] = 0x33; // payload byte 3
-    var pg = try parse_page(t.allocator, &buf, 2); // page 2, no header offset
+    var pg = try parse_page(t.allocator, &buf, 2, &db_header); // page 2, no header offset
     defer t.allocator.free(pg.Leaf.cell_pointers);
     defer pg.Leaf.cells.deinit(t.allocator);
     try t.expectEqual(PageType.Leaf, pg.Leaf.header.page_type);
@@ -399,6 +493,10 @@ test "parse_page_rest" {
 // TODO: change this test to use an encoder instead of defining a raw byte array
 test "parse_page" {
     var buf = [_]u8{0} ** 123;
+    const db_header = DbHeader{
+        .page_size = 4096,
+        .page_reserved_size = 0,
+    };
     buf[100] = 0x0D; // page type: SQLite table leaf page
     buf[101] = 0x00;
     buf[102] = 0x00; // first free block
@@ -417,7 +515,7 @@ test "parse_page" {
     buf[121] = 0xDD;
     buf[122] = 0xEE; // payload
 
-    var pg = try parse_page(t.allocator, &buf, 1);
+    var pg = try parse_page(t.allocator, &buf, 1, &db_header);
     defer t.allocator.free(pg.Leaf.cell_pointers);
     defer pg.Leaf.cells.deinit(t.allocator);
     try t.expectEqual(PageType.Leaf, pg.Leaf.header.page_type);

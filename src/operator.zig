@@ -30,7 +30,7 @@ pub const SeqScan = struct {
 
     pub fn next_row(self: *Self) !?[]const OwnedValue {
         var rec = try self.scanner.next_record() orelse return null;
-        defer rec.deinit(self.alloc);
+        defer rec.deinit();
 
         // Free previous row values and clear buffer
         for (self.row_buffer.items) |*ov| ov.deinit();

@@ -5,12 +5,18 @@ const parse_header = @import("page.zig").parse_header;
 const cnst = @import("constants.zig");
 const Allocator = std.mem.Allocator;
 
+pub const CachedPage = union(enum) {
+    page: Page.Page,
+    overflow: Page.OverflowPage,
+};
+
 io: Io,
 f: Io.File,
 page_size: usize,
 bufs: std.AutoHashMap(usize, []u8),
-pages: std.AutoHashMap(usize, Page.Page),
+pages: std.AutoHashMap(usize, CachedPage),
 alloc: Allocator,
+header: Page.DbHeader,
 
 const Self = @This();
 
@@ -27,6 +33,7 @@ pub fn new(alloc: Allocator, io: Io, f: Io.File) !Self {
         .io = io,
         .f = f,
         .page_size = @intCast(header.page_size),
+        .header = header,
         .bufs = .init(alloc),
         .pages = .init(alloc),
         .alloc = alloc,
@@ -41,13 +48,18 @@ pub fn deinit(self: *Self) void {
     var pit = self.pages.iterator();
     while (pit.next()) |entry| {
         switch (entry.value_ptr.*) {
-            .Interior => |*pg| {
-                self.alloc.free(pg.cell_pointers);
-                pg.cells.deinit(self.alloc);
+            .page => |*cached_page| switch (cached_page.*) {
+                .Interior => |*pg| {
+                    self.alloc.free(pg.cell_pointers);
+                    pg.cells.deinit(self.alloc);
+                },
+                .Leaf => |*pg| {
+                    self.alloc.free(pg.cell_pointers);
+                    pg.cells.deinit(self.alloc);
+                },
             },
-            .Leaf => |*pg| {
-                self.alloc.free(pg.cell_pointers);
-                pg.cells.deinit(self.alloc);
+            .overflow => |*ov| {
+                self.alloc.free(ov.payload);
             },
         }
     }
@@ -55,38 +67,64 @@ pub fn deinit(self: *Self) void {
     self.pages.deinit();
 }
 
+// pub fn read_overflow(self: *Self, n: usize) !CachedPage {}
+
 pub fn read_page(self: *Self, n: usize) !*const Page.Page {
-    // cache hit
-    if (self.pages.contains(n)) {
-        return self.pages.getPtr(n) orelse unreachable;
+    if (!self.pages.contains(n)) {
+        const pg = try self.load_page(n);
+        try self.pages.put(n, .{ .page = pg });
     }
 
-    // cache miss
-    const pg = try self.load_page(n);
-    try self.pages.put(n, pg);
+    const cached = self.pages.getPtr(n) orelse unreachable;
 
-    return self.pages.getPtr(n) orelse unreachable;
+    return switch (cached.*) {
+        .page => |*pg| pg,
+        .overflow => error.CachedPageTypeMismatch,
+    };
+}
+
+pub fn read_overflow(self: *Self, n: usize) !*const Page.OverflowPage {
+    if (!self.pages.contains(n)) {
+        const pg = try self.load_overflow(n);
+        try self.pages.put(n, .{ .overflow = pg });
+    }
+
+    const cached = self.pages.getPtr(n) orelse unreachable;
+
+    return switch (cached.*) {
+        .page => error.CachedPageTypeMismatch,
+        .overflow => |*pg| pg,
+    };
+}
+
+fn load_raw(self: *Self, n: usize) ![]u8 {
+    if (self.bufs.contains(n)) return self.bufs.get(n) orelse unreachable;
+    const buffer = try self.alloc.alloc(u8, self.header.page_size);
+    const offset = (n - 1) * self.page_size;
+
+    var readbuf: [1024]u8 = undefined;
+    var filereader = self.f.reader(self.io, &readbuf);
+    try filereader.seekTo(@intCast(offset));
+    try filereader.interface.readSliceAll(buffer);
+
+    return buffer;
 }
 
 fn load_page(self: *Self, n: usize) !Page.Page {
     if (n == 0) return error.InvalidPageNumber;
+    const rawbuf = try self.load_raw(n);
+    return Page.parse_page(
+        self.alloc,
+        rawbuf[0..self.header.usable_page_size()],
+        n,
+        &self.header,
+    );
+}
 
-    const page_index = n - 1;
-    const offset = page_index * self.page_size;
-
-    const buffer = try self.alloc.alloc(u8, self.page_size);
-    try self.bufs.put(n, buffer);
-    errdefer {
-        self.alloc.free(buffer);
-        _ = self.bufs.remove(n);
-    }
-
-    var reader_buf: [1024]u8 = undefined;
-    var file_reader = self.f.reader(self.io, &reader_buf);
-    try file_reader.seekTo(@intCast(offset));
-    try file_reader.interface.readSliceAll(buffer);
-
-    return Page.parse_page(self.alloc, buffer, n);
+fn load_overflow(self: *Self, n: usize) !Page.OverflowPage {
+    if (n == 0) return error.InvalidPageNumber;
+    const rawbuf = try self.load_raw(n);
+    return Page.parse_overflow_page(self.alloc, rawbuf);
 }
 
 const t = std.testing;
@@ -94,13 +132,13 @@ const t = std.testing;
 test "load_page" {
     var scratch: [8192]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&scratch);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
 
-    var file = try std.fs.cwd().createFile("data.bin", .{
+    var file = try tmp.dir.createFile(t.io, "data.bin", .{
         .read = true,
     });
-
-    defer file.close();
-    defer std.fs.cwd().deleteFile("data.bin") catch {};
+    defer file.close(t.io);
 
     var full_page = [_]u8{0} ** 4096;
     @memcpy(full_page[0..cnst.HEADER_PREFIX.len], cnst.HEADER_PREFIX);
@@ -125,9 +163,11 @@ test "load_page" {
     full_page[121] = 0xDD;
     full_page[122] = 0xEE; // payload
 
-    try file.writeAll(&full_page);
+    var writer_buf: [256]u8 = undefined;
+    var file_writer = file.writer(t.io, &writer_buf);
+    try file_writer.interface.writeAll(&full_page);
 
-    var pm = try Self.new(fba.allocator(), file);
+    var pm = try Self.new(fba.allocator(), t.io, file);
 
     const page = try load_page(&pm, 1);
     try t.expectEqual(Page.PageType.Leaf, page.Leaf.header.page_type);

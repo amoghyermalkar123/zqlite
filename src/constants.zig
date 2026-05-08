@@ -16,3 +16,4 @@ pub const PAGE_CELL_COUNT_OFFSET: usize = 3;
 pub const PAGE_CELL_CONTENT_OFFSET: usize = 5;
 pub const PAGE_FRAGMENTED_BYTES_COUNT_OFFSET: usize = 7;
 pub const RIGHTMOST_POINTER_OFFSET: usize = 8;
+pub const HEADER_PAGE_RESERVED_SIZE_OFFSET = 20;

@@ -3,6 +3,7 @@ const pg = @import("page.zig");
 const RecordHeader = @import("page.zig").RecordHeader;
 const Pager = @import("pager_manager.zig");
 const Allocator = std.mem.Allocator;
+const OverflowScanner = @import("overflow_scanner.zig");
 
 // strings are borrowed from page payload
 pub const Value = union(enum) {
@@ -61,22 +62,43 @@ pub const OwnedValue = struct {
 // a record is a cell basically
 pub const Cursor = struct {
     record_header: RecordHeader,
-    payload: []u8 = undefined,
+    cell_payload: std.ArrayList(u8),
+    pager: *Pager,
+    next_overflow_page: ?usize,
+    alloc: Allocator,
 
     const Self = @This();
 
-    pub fn deinit(self: Cursor, alloc: Allocator) void {
-        alloc.free(self.payload);
-        alloc.free(self.record_header.fields);
+    pub fn deinit(self: *Cursor) void {
+        self.cell_payload.deinit(self.alloc);
+        self.alloc.free(self.record_header.fields);
+    }
+
+    fn ensurePayloadLoaded(self: *Self, end_offset: usize) !void {
+        if (end_offset <= self.cell_payload.items.len) return;
+
+        const first_overflow = self.next_overflow_page orelse return error.RecordFieldOutOfBounds;
+
+        const missing = end_offset - self.cell_payload.items.len;
+        var overflow_scanner = OverflowScanner.new(self.alloc, self.pager);
+        const ovd = try overflow_scanner.read(first_overflow, missing);
+        defer self.alloc.free(ovd.data);
+
+        self.next_overflow_page = ovd.next_overflow_page;
+        try self.cell_payload.appendSlice(self.alloc, ovd.data);
+
+        if (end_offset > self.cell_payload.items.len) return error.RecordFieldOutOfBounds;
     }
 
     // given `n` returns back the nth gield in the record (i.e. row) if found
     // else returns null
     pub fn field(self: *Self, n: usize) !?Value {
-        if (n >= self.record_header.fields.len) return error.InvalidIndex;
+        if (n >= self.record_header.fields.len) return null;
 
         const record_field = self.record_header.fields[n];
-        var decoder = pg.Decoder{ .buffer = self.payload };
+        try self.ensurePayloadLoaded(record_field.end_offset());
+
+        var decoder = pg.Decoder{ .buffer = self.cell_payload.items };
 
         switch (record_field.field_type) {
             .Null => return .Null,
@@ -112,8 +134,6 @@ const t = std.testing;
 test "Cursor.field decodes integer and string fields from cached page" {
     var scratch: [2048]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&scratch);
-    const io = t.io;
-
     const payload = [_]u8{
         0x03, // header size
         0x01, // serial type: i8
@@ -123,46 +143,17 @@ test "Cursor.field decodes integer and string fields from cached page" {
     };
 
     const header = try pg.parse_record_header(fba.allocator(), &payload);
-
-    var cells = try std.ArrayList(pg.TableLeafCell).initCapacity(fba.allocator(), 1);
-    try cells.append(fba.allocator(), .{
-        .size = 2,
-        .row_id = 1,
-        .payload = &payload,
-    });
-    var cell_pointers = [_]u16{0};
-
-    var pages = std.AutoHashMap(usize, pg.Page).init(fba.allocator());
-    defer pages.deinit();
-
-    try pages.put(1, .{
-        .Leaf = .{
-            .header = .{
-                .page_type = .Leaf,
-                .first_free_block = 0,
-                .cell_count = 1,
-                .cell_content_offset = 0,
-                .fragmented_byts_count = 0,
-            },
-            .cell_pointers = cell_pointers[0..],
-            .cells = cells,
-        },
-    });
-
-    var pager: Pager = .{
-        .f = undefined,
-        .io = io,
-        .page_size = 4096,
-        .pages = pages,
-        .alloc = fba.allocator(),
-    };
+    var payload_buf = try std.ArrayList(u8).initCapacity(fba.allocator(), payload.len);
+    try payload_buf.appendSlice(fba.allocator(), &payload);
 
     var cursor = Cursor{
         .record_header = header,
-        .pager = &pager,
-        .page_index = 1,
-        .page_cell = 0,
+        .cell_payload = payload_buf,
+        .pager = undefined,
+        .next_overflow_page = null,
+        .alloc = fba.allocator(),
     };
+    defer cursor.deinit();
 
     const v0 = (try cursor.field(0)).?;
     switch (v0) {

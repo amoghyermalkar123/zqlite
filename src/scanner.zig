@@ -82,11 +82,17 @@ fn next_element(self: *Self) !?ScannedElement {
         // if current page is leaf, return the currently read leaf cell
         .Leaf => |c| {
             const header = try pg.parse_record_header(self.alloc, c.payload);
+            var payload = try std.ArrayList(u8).initCapacity(self.alloc, c.payload.len);
+            errdefer payload.deinit(self.alloc);
+            try payload.appendSlice(self.alloc, c.payload);
 
             return ScannedElement{
                 .Cursor = .{
-                    .payload = try self.alloc.dupe(u8, c.payload),
+                    .alloc = self.alloc,
+                    .cell_payload = payload,
                     .record_header = header,
+                    .pager = self.pager,
+                    .next_overflow_page = c.first_overflow,
                 },
             };
         },
