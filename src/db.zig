@@ -23,7 +23,7 @@ pub fn deinit(self: *Self) void {
 }
 
 pub fn from_file(io: Io, alloc: Allocator, filename: []const u8) !Self {
-    const f = try Io.Dir.openFileAbsolute(io, filename, .{ .mode = .read_write });
+    const f = try Io.Dir.cwd().openFile(io, filename, .{ .mode = .read_write });
 
     // This is reading the database header. Actual page layouts
     // start after the database header.
@@ -110,7 +110,7 @@ fn collect_table_metadata(pager: *pgm, alloc: Allocator) ![]TableMetadata {
     while (next != null) : ({
         next = try scn.next_record();
     }) {
-        defer next.?.deinit(alloc);
+        defer next.?.deinit();
         try metadata.append(alloc, try TableMetadata.from_cursor(&next.?, alloc) orelse continue);
     }
 

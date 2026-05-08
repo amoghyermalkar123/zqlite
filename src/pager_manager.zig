@@ -100,6 +100,11 @@ pub fn read_overflow(self: *Self, n: usize) !*const Page.OverflowPage {
 fn load_raw(self: *Self, n: usize) ![]u8 {
     if (self.bufs.contains(n)) return self.bufs.get(n) orelse unreachable;
     const buffer = try self.alloc.alloc(u8, self.header.page_size);
+    try self.bufs.put(n, buffer);
+    errdefer {
+        self.alloc.free(buffer);
+        _ = self.bufs.remove(n);
+    }
     const offset = (n - 1) * self.page_size;
 
     var readbuf: [1024]u8 = undefined;
