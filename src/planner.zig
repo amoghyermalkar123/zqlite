@@ -32,15 +32,15 @@ pub const Planner = struct {
             }
         } else return error.TableNotFound;
 
+        // TODO: since we have metadata at comptime, we can statically allocate the
+        // required memory here.
         var cols = try std.ArrayList(usize).initCapacity(self.alloc, 1);
         errdefer cols.deinit(self.alloc);
 
         for (stmt.core.result_columns.items) |res_col| {
             switch (res_col) {
                 .Star => {
-                    for (table.cols, 0..) |_, ix| {
-                        try cols.append(self.alloc, ix);
-                    }
+                    for (table.cols, 0..) |_, ix| try cols.append(self.alloc, ix);
                 },
                 .Expr => |e| {
                     const cl = e.expr.Column.name;

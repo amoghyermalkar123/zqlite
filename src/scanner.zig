@@ -12,8 +12,6 @@ const PositionedPage = @import("positioned_page.zig");
 const Self = @This();
 
 pager: *Pager,
-page: usize,
-cell: usize = 0,
 page_stack: std.ArrayList(PositionedPage) = .empty,
 alloc: Allocator,
 initial_page: usize,
@@ -21,7 +19,6 @@ initial_page: usize,
 pub fn new(pager: *Pager, alloc: Allocator, page_num: usize) !Self {
     return .{
         .pager = pager,
-        .page = page_num,
         .alloc = alloc,
         .initial_page = page_num,
         .page_stack = try .initCapacity(alloc, 3),

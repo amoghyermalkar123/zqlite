@@ -67,8 +67,6 @@ pub fn deinit(self: *Self) void {
     self.pages.deinit();
 }
 
-// pub fn read_overflow(self: *Self, n: usize) !CachedPage {}
-
 pub fn read_page(self: *Self, n: usize) !*const Page.Page {
     if (!self.pages.contains(n)) {
         const pg = try self.load_page(n);

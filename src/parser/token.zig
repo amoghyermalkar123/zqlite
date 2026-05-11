@@ -95,3 +95,16 @@ pub fn tokenize(alloc: Allocator, input: []const u8) ![]Token {
 fn isIdentChar(c: u8) bool {
     return std.ascii.isAlphanumeric(c) or c == '_';
 }
+
+const t = std.testing;
+
+test "tokenize" {
+    const result = try tokenize(t.allocator, "SELECT * FROM columns");
+    defer t.allocator.free(result);
+    defer t.allocator.free(result[3].Identifier);
+
+    try t.expect(result[0] == Token.Select);
+    try t.expect(result[1] == Token.Star);
+    try t.expect(result[2] == Token.From);
+    try t.expect(result[3] == Token.Identifier);
+}

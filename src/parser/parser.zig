@@ -71,7 +71,10 @@ const ParserState = struct {
 
     // parse_select parses a select statement
     fn parse_select(self: *Self, alloc: Allocator) !ast.SelectStatement {
+        // the first token should be select
         _ = try self.expectNextTokenEq(Token.Select);
+        // TODO: do we have to free this list or no? since we are creating
+        // a new one from this at the return site.
         const cols = try self.parse_result_columns(alloc);
         _ = try self.expectNextTokenEq(Token.From);
         const from = try self.parse_select_from();
@@ -83,7 +86,8 @@ const ParserState = struct {
         };
     }
 
-    // parse_select_from parses a selectFrom statement
+    /// parse_select_from parses a selectFrom statement
+    /// Used to populate the table name
     fn parse_select_from(self: *Self) !ast.SelectFrom {
         const table = try self.expectIdentifier();
         return ast.SelectFrom{ .Table = table };
@@ -105,6 +109,8 @@ const ParserState = struct {
         const alias: ?[]const u8 = blk: {
             if (self.nextTokenIs(Token.As)) {
                 self.advance();
+                // TODO: won't this throw an error when the alias isnt
+                // provided, the SQl should still be valid I guess..
                 const v = try self.expectIdentifier();
                 break :blk v;
             } else break :blk null;
@@ -135,7 +141,10 @@ const ParserState = struct {
         const first = try self.parse_result_column();
         try l.append(alloc, first);
 
+        // The Comma token seperates the list of column names
         while (self.nextTokenIs(Token.Comma)) {
+            // We need to advance here because the subsequent parsers
+            // check whether the next token is Star or a Result Column Expression
             self.advance();
             try l.append(alloc, try self.parse_result_column());
         }
@@ -148,6 +157,7 @@ const ParserState = struct {
         return std.meta.eql(self.tokens[self.pos], expected);
     }
 
+    /// Returns the next token if it is an identifier or throws an error
     fn expectIdentifier(self: *Self) ParseError![]const u8 {
         const tkn = self.nextToken() orelse return ParseError.UnexpectedEndOfInput;
         return switch (tkn) {
@@ -166,11 +176,13 @@ const ParserState = struct {
         return ParseError.UnexpectedToken;
     }
 
+    /// Returns the Token at the current position, does not advance the `pos` cursor
     fn peek(self: Self) ?Token {
         if (self.pos >= self.tokens.len) return null;
         return self.tokens[self.pos];
     }
 
+    /// Gives the token in current position and advances the `pos` cursor
     fn nextToken(self: *Self) ?Token {
         if (self.pos >= self.tokens.len) return null;
         const tkn = self.tokens[self.pos];
