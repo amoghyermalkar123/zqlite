@@ -192,8 +192,7 @@ test "PageBuilder builds leaf page with one cell" {
     defer t.allocator.free(raw_page);
 
     var parsed = try page.parse_page(t.allocator, raw_page, 2, &db_header);
-    defer t.allocator.free(parsed.Leaf.cell_pointers);
-    defer parsed.Leaf.cells.deinit(t.allocator);
+    defer page.deinitPage(t.allocator, &parsed);
 
     try t.expectEqual(page.PageType.Leaf, parsed.Leaf.header.page_type);
     try t.expectEqual(@as(u16, 1), parsed.Leaf.header.cell_count);
@@ -216,8 +215,7 @@ test "PageBuilder builds leaf page with multiple cells" {
     defer t.allocator.free(raw_page);
 
     var parsed = try page.parse_page(t.allocator, raw_page, 2, &db_header);
-    defer t.allocator.free(parsed.Leaf.cell_pointers);
-    defer parsed.Leaf.cells.deinit(t.allocator);
+    defer page.deinitPage(t.allocator, &parsed);
 
     try t.expectEqual(@as(usize, 2), parsed.Leaf.cells.items.len);
     try t.expectEqual(@as(i64, 1), parsed.Leaf.cells.items[0].row_id);
@@ -242,8 +240,7 @@ test "PageBuilder builds interior page" {
     defer t.allocator.free(raw_page);
 
     var parsed = try page.parse_page(t.allocator, raw_page, 2, &db_header);
-    defer t.allocator.free(parsed.Interior.cell_pointers);
-    defer parsed.Interior.cells.deinit(t.allocator);
+    defer page.deinitPage(t.allocator, &parsed);
 
     try t.expectEqual(page.PageType.Interior, parsed.Interior.header.page_type);
     try t.expectEqual(@as(?u32, 9), parsed.Interior.header.rightmost_pointer);
@@ -273,8 +270,7 @@ test "PageBuilder roundtrip record payload" {
     defer t.allocator.free(raw_page);
 
     var parsed = try page.parse_page(t.allocator, raw_page, 2, &db_header);
-    defer t.allocator.free(parsed.Leaf.cell_pointers);
-    defer parsed.Leaf.cells.deinit(t.allocator);
+    defer page.deinitPage(t.allocator, &parsed);
 
     const header = try page.parse_record_header(t.allocator, parsed.Leaf.cells.items[0].payload);
     defer t.allocator.free(header.fields);
@@ -302,8 +298,7 @@ test "PageBuilder builds page 1 file image" {
     try t.expectEqualSlices(u8, cnst.HEADER_PREFIX, file_page[0..cnst.HEADER_PREFIX.len]);
 
     var parsed = try page.parse_page(t.allocator, file_page, 1, &db_header);
-    defer t.allocator.free(parsed.Leaf.cell_pointers);
-    defer parsed.Leaf.cells.deinit(t.allocator);
+    defer page.deinitPage(t.allocator, &parsed);
 
     try t.expectEqual(page.PageType.Leaf, parsed.Leaf.header.page_type);
     try t.expectEqual(@as(i64, 5), parsed.Leaf.cells.items[0].row_id);
@@ -326,8 +321,7 @@ test "PageBuilder builds file image for page 2" {
     try t.expectEqualSlices(u8, cnst.HEADER_PREFIX, file_buf[0..cnst.HEADER_PREFIX.len]);
 
     var parsed = try page.parse_page(t.allocator, file_buf[512..1024], 2, &db_header);
-    defer t.allocator.free(parsed.Leaf.cell_pointers);
-    defer parsed.Leaf.cells.deinit(t.allocator);
+    defer page.deinitPage(t.allocator, &parsed);
 
     try t.expectEqual(page.PageType.Leaf, parsed.Leaf.header.page_type);
     try t.expectEqual(@as(i64, 7), parsed.Leaf.cells.items[0].row_id);

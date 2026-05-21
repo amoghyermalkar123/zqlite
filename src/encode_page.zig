@@ -454,8 +454,7 @@ test "encode leaf page roundtrip parse" {
     defer t.allocator.free(page_buf);
 
     var parsed = try page.parse_page(t.allocator, page_buf, 2, &db_header);
-    defer t.allocator.free(parsed.Leaf.cell_pointers);
-    defer parsed.Leaf.cells.deinit(t.allocator);
+    defer page.deinitPage(t.allocator, &parsed);
 
     try t.expectEqual(page.PageType.Leaf, parsed.Leaf.header.page_type);
     try t.expectEqual(@as(u16, 2), parsed.Leaf.header.cell_count);

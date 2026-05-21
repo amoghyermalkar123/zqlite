@@ -114,7 +114,7 @@ pub const PageHeader = struct {
 pub const TableLeafCell = struct {
     size: i64,
     row_id: i64,
-    payload: []const u8,
+    payload: []u8,
     first_overflow: ?usize,
 };
 
@@ -138,6 +138,22 @@ pub fn parse_overflow_page(alloc: Allocator, buffer: []const u8) !OverflowPage {
         .payload = payload,
         .next = if (next_raw != 0) @as(usize, next_raw) else null,
     };
+}
+
+pub fn deinitPage(alloc: Allocator, page: *Page) void {
+    switch (page.*) {
+        .Leaf => |*leaf| deinitLeafPage(alloc, leaf),
+        .Interior => |*interior| {
+            alloc.free(interior.cell_pointers);
+            interior.cells.deinit(alloc);
+        },
+    }
+}
+
+pub fn deinitLeafPage(alloc: Allocator, leaf: *TableLeafPage) void {
+    for (leaf.cells.items) |cell| alloc.free(cell.payload);
+    alloc.free(leaf.cell_pointers);
+    leaf.cells.deinit(alloc);
 }
 
 pub fn parse_page(alloc: Allocator, buffer: []const u8, page_num: usize, db_header: *const DbHeader) !Page {
@@ -165,7 +181,7 @@ fn parse_table_leaf_page(alloc: Allocator, decoder: *Decoder, page_offset: usize
         .Leaf => {
             var cells = try std.ArrayList(TableLeafCell).initCapacity(alloc, cell_pointers.len);
             for (cell_pointers) |cell_ptr| {
-                try cells.append(alloc, try parse_table_leaf_cell(decoder.buffer, cell_ptr, db_header, &pg_hdr));
+                try cells.append(alloc, try parse_table_leaf_cell(alloc, decoder.buffer, cell_ptr, db_header, &pg_hdr));
             }
 
             return Page{
@@ -231,7 +247,7 @@ fn parse_cell_pointers(alloc: Allocator, raw_buf: []const u8, page_offset: usize
     return pointers.toOwnedSlice(alloc);
 }
 
-fn parse_table_leaf_cell(raw_buf: []const u8, cell_ptr: u16, db_header: *const DbHeader, page_header: *const PageHeader) !TableLeafCell {
+fn parse_table_leaf_cell(alloc: Allocator, raw_buf: []const u8, cell_ptr: u16, db_header: *const DbHeader, page_header: *const PageHeader) !TableLeafCell {
     var decoder = Decoder.initAt(raw_buf, cell_ptr);
 
     const payload_size = try decoder.readVarint();
@@ -241,7 +257,9 @@ fn parse_table_leaf_cell(raw_buf: []const u8, cell_ptr: u16, db_header: *const D
     const local_size = sizes[0];
     const overflow_size = sizes[1];
 
-    const payload = try decoder.readSlice(local_size);
+    const borrowed = try decoder.readSlice(local_size);
+    const payload = try alloc.dupe(u8, borrowed);
+    errdefer alloc.free(payload);
 
     // pointer to the first overflow page
     const first_overflow = if (overflow_size != null)
@@ -431,8 +449,7 @@ test "parse page 1 uses 100 byte header offset" {
     defer t.allocator.free(full_buf);
 
     var pg = try parse_page(t.allocator, full_buf, 1, &db_header);
-    defer t.allocator.free(pg.Leaf.cell_pointers);
-    defer pg.Leaf.cells.deinit(t.allocator);
+    defer deinitPage(t.allocator, &pg);
 
     try t.expectEqual(PageType.Leaf, pg.Leaf.header.page_type);
     try t.expectEqual(@as(u16, 1), pg.Leaf.header.cell_count);

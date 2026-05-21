@@ -55,8 +55,7 @@ pub fn deinit(self: *Self) void {
                     pg.cells.deinit(self.alloc);
                 },
                 .Leaf => |*pg| {
-                    self.alloc.free(pg.cell_pointers);
-                    pg.cells.deinit(self.alloc);
+                    Page.deinitLeafPage(self.alloc, pg);
                 },
             },
             .overflow => |*ov| {
