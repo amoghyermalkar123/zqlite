@@ -228,9 +228,9 @@ pub const Decoder = struct {
 
 ---
 
-### Phase 5: Create PageBuilder test helper
+### [done] Phase 5: Create PageBuilder test helper
 
-#### Step 5.1: Create `src/testing/page_builder.zig` with basic structure
+#### [done] Step 5.1: Create `src/testing/page_builder.zig` with basic structure
 
 - Create new file with `PageBuilder` struct containing: `alloc`, `page_type`, `db_header`, `cells: std.ArrayList(EncodedCell)`, `rightmost_pointer`
 - Define `EncodedCell = struct { data: []u8 }` (owned)
@@ -238,7 +238,7 @@ pub const Decoder = struct {
 
 **Dependencies:** Steps 2.2, 2.3
 
-#### Step 5.2: Implement `addLeafCell`
+#### [done] Step 5.2: Implement `addLeafCell`
 
 - Call `encode_record(alloc, values)` -> record bytes
 - Call `encode_table_leaf_cell(alloc, db_header, @intCast(rowid), record)` -> cell bytes
@@ -246,7 +246,7 @@ pub const Decoder = struct {
 
 **Dependencies:** Step 5.1
 
-#### Step 5.3: Implement `addInteriorCell`
+#### [done] Step 5.3: Implement `addInteriorCell`
 
 - Interior cell layout: 4 bytes (`left_child_page`, big-endian u32) + varint (key)
 - Allocate buffer, write `left_child` as big-endian u32, `varint.encode(key, buf[4..])`
@@ -254,7 +254,7 @@ pub const Decoder = struct {
 
 **Dependencies:** Step 5.1
 
-#### Step 5.4: Implement `build`
+#### [done] Step 5.4: Implement `build`
 
 - Compute total page size: header + cell_pointers(2*n) + cell_content_sum + rightmost_pointer(4 if interior)
 - Allocate buffer, zero it
@@ -265,7 +265,7 @@ pub const Decoder = struct {
 
 **Dependencies:** Step 5.3
 
-#### Step 5.5: Implement `deinit` and add PageBuilder tests
+#### [done] Step 5.5: Implement `deinit` and add PageBuilder tests
 
 - `deinit`: free all cell data slices, deinit cells ArrayList
 - Tests: build leaf page with one cell, multiple cells, interior page, roundtrip encode->parse
@@ -290,7 +290,7 @@ pub const Decoder = struct {
 
 **Dependencies:** Step 6.1
 
-#### Step 6.3: Rewrite `pager_manager.zig` test `"load_page"`
+#### [done] Step 6.3: Rewrite `pager_manager.zig` test `"load_page"`
 
 - Remove all `full_page[N] = 0xXX` raw byte assignments
 - Use PageBuilder to construct page bytes, write to test file, parse via pager
