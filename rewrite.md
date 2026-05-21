@@ -68,46 +68,70 @@ Replace the offset-computing decoder pattern with a streaming decoder, unify the
 
 ---
 
-### Phase 2: Update encoder to use new varint API
+### [done] Phase 2: Create encoder using varint API (`src/encode_page.zig`)
 
-#### Step 2.1: Update `encode_page.zig` imports and delete EncodedVarint
+#### [done] Step 2.1: Create `src/encode_page.zig` with `encode_record`
 
+- Create new file `src/encode_page.zig`
+- Add `const std = @import("std");`
 - Add `const varint = @import("varint.zig");`
-- Delete `EncodedVarint` struct (lines 9-12)
-- Delete `encode_varint` function (lines 15-105)
+- Add `const cnst = @import("constants.zig");`
+- Add `const page = @import("page.zig");`
+- Implement `pub fn encode_record(alloc: std.mem.Allocator, fields: []const page.RecordFieldEntry) ![]u8`:
+  - First pass: compute serial types and header size using `varint.lenFor`
+  - Allocate record buffer: header_size + total payload size
+  - Write header size varint at position 0
+  - Write serial type varints after header size
+  - Write field data (integers as big-endian, strings/blobs as raw bytes)
+  - Return owned slice
+
+**Tests:** encode empty record, encode single integer, encode string, encode mixed types, verify buffer layout
 
 **Dependencies:** Step 1.4
 
-#### Step 2.2: Update `encode_record` to use `varint.encodeAppend` and `varint.lenFor`
+#### [done] Step 2.2: Add `encode_table_leaf_cell`
 
-- Replace `encode_varint(ef.serial_type)` -> `varint.encodeAppend(ef.serial_type, &header_buf)`
-- Replace `enc_ser.len` -> `varint.lenFor(ef.serial_type)`
-- Replace header-size loop's `encode_varint(header_size)` -> `varint.lenFor(header_size)`
-- Replace `header_size_varint.buf[0..header_size_varint.len]` -> `varint.encodeAppend(header_size, &record_buf)`
+- Implement `pub fn encode_table_leaf_cell(alloc: std.mem.Allocator, db_header: page.DbHeader, rowid: u64, record_payload: []const u8) ![]u8`:
+  - Cell layout: varint(payload_size) + varint(rowid) + payload_bytes + [4-byte overflow pointer if overflow]
+  - Use `varint.encodeAppend` for payload size and rowid
+  - Compute local payload size using `page.PageHeader.local_payload_size`
+  - If overflow, append 4-byte big-endian overflow page number
+  - Return owned slice
 
-**Dependencies:** Step 2.1
-
-#### Step 2.3: Update `encode_table_leaf_cell` to use `varint.encodeAppend`
-
-- Replace `encode_varint(@intCast(rowid))` -> `varint.encodeAppend(@intCast(rowid), &arl)`
-- Replace `encode_varint(record_payload.len)` -> `varint.encodeAppend(record_payload.len, &arl)`
-- Remove `encr.buf[0..encr.len]` and `paylvr.buf[0..paylvr.len]` slicing
+**Tests:** encode cell with small payload, encode cell with overflow, verify byte layout
 
 **Dependencies:** Step 2.1
 
-#### Step 2.4: Fix `encode_page.zig` tests
+#### [done] Step 2.3: Add `encode_table_interior_cell`
 
-- Fix broken test at line 365: `payload_size.res` -> `payload_size.value`, `payload_size.n` -> `payload_size.len`
-- Same for `rowid.res` -> `rowid.value`, `rowid.n` -> `rowid.len`
-- Update `encode_varint(300)` test to use `varint.encode(300, &buf)`
+- Implement `pub fn encode_table_interior_cell(left_child_page: u32, key: u64) ![]u8`:
+  - Cell layout: 4 bytes (left_child_page, big-endian u32) + varint(key)
+  - Allocate buffer, write left_child as big-endian u32, `varint.encode(key, buf[4..])`
+  - Return owned slice
+
+**Tests:** encode interior cell, verify byte layout
 
 **Dependencies:** Step 2.1
+
+#### [done] Step 2.4: Add `encode_page` (full page encoder)
+
+- Implement `pub fn encode_leaf_page(alloc: std.mem.Allocator, db_header: page.DbHeader, cells: []const []const u8) ![]u8`:
+  - Compute total page size: 8-byte header + 2*cell_count cell pointers + sum of cell sizes
+  - Allocate buffer, zero it
+  - Write page header (type=0x0D, freeblock=0, cell_count, content_offset, fragmented=0)
+  - Write cell pointers at offset 8 + 2*i (big-endian u16)
+  - Write cell content from end of buffer backwards (SQLite convention)
+  - Return owned buffer
+
+**Tests:** encode page with one cell, encode page with multiple cells, verify roundtrip encode→parse
+
+**Dependencies:** Step 2.2
 
 ---
 
-### Phase 3: Rewrite streaming Decoder in `page.zig`
+### Phase [done] 3: Rewrite streaming Decoder in `page.zig`
 
-#### Step 3.1: Rewrite Decoder struct with position tracking
+#### Step [done] 3.1: Rewrite Decoder struct with position tracking
 
 Replace existing Decoder struct (lines 129-151) with:
 
@@ -133,7 +157,7 @@ pub const Decoder = struct {
 
 **Dependencies:** Step 1.4
 
-#### Step 3.2: Add Decoder tests
+#### Step [done] 3.2: Add Decoder tests
 
 - `test "Decoder readVarint advances position"` - value=300, len=2, pos=2, remaining=[0xFF]
 - `test "Decoder readInt advances position"` - readInt(u16) -> 1, pos=2
@@ -145,9 +169,9 @@ pub const Decoder = struct {
 
 ---
 
-### Phase 4: Rewrite all `parse_*` functions to streaming style
+### [done] Phase 4: Rewrite all `parse_*` functions to streaming style
 
-#### Step 4.1: Rewrite `parse_table_leaf_cell` to streaming style
+#### Step [done] 4.1: Rewrite `parse_table_leaf_cell` to streaming style
 
 - Change signature: remove `*Decoder` param, take `raw_buf: []const u8` and `cell_ptr: u16`
 - Create local decoder: `var decoder = Decoder.initAt(raw_buf, cell_ptr)`
@@ -157,7 +181,7 @@ pub const Decoder = struct {
 
 **Dependencies:** Step 3.1
 
-#### Step 4.2: Rewrite `parse_table_internal_cell` to streaming style
+#### Step [done] 4.2: Rewrite `parse_table_internal_cell` to streaming style
 
 - Change signature: take `raw_buf: []const u8` and `cell_ptr: u16`
 - Create `var decoder = Decoder.initAt(raw_buf, cell_ptr)`
@@ -166,14 +190,14 @@ pub const Decoder = struct {
 
 **Dependencies:** Step 3.1
 
-#### Step 4.3: Update `parse_table_leaf_page` to pass raw buffer to cell parsers
+#### Step [done] 4.3: Update `parse_table_leaf_page` to pass raw buffer to cell parsers
 
 - Pass `decoder.buffer` (the raw buffer) to `parse_table_leaf_cell` and `parse_table_internal_cell`
 - Keep Decoder for parsing cell pointers (at known offsets)
 
 **Dependencies:** Steps 4.1, 4.2
 
-#### Step 4.4: Rewrite `parse_record_header` to streaming style
+#### [done] Step 4.4: Rewrite `parse_record_header` to streaming style
 
 - Replace `var decoder = Decoder{ .buffer = cell_payload }` -> `var decoder = Decoder.init(cell_payload)`
 - Replace `read_varint_at(&decoder, 0)` -> `decoder.readVarint()`
@@ -182,21 +206,21 @@ pub const Decoder = struct {
 
 **Dependencies:** Step 3.1
 
-#### Step 4.5: Delete `read_varint_at` function
+#### [done] Step 4.5: Delete `read_varint_at` function
 
 - Delete the `read_varint_at` function (lines 289-324)
 - Remove any remaining references
 
 **Dependencies:** Steps 4.1-4.4
 
-#### Step 4.6: Update `parse_page_header` to streaming style
+#### Step [done] 4.6: Update `parse_page_header` to streaming style
 
 - `decoder.seekTo(page_offset)` once, then call `readEnum`, `readInt` sequentially
 - Remove explicit offset calculations like `page_offset + cnst.PAGE_FIRST_FREEBLOCK_OFFSET`
 
 **Dependencies:** Step 3.1
 
-#### Step 4.7: Update `parse_cell_pointers` to streaming style
+#### [done] Step 4.7: Update `parse_cell_pointers` to streaming style
 
 - Create `Decoder.initAt(buffer, page_offset + header_size)` and call `readInt(u16)` in a loop
 
@@ -404,7 +428,7 @@ pub const Decoder = struct {
 |------|--------|-------------|
 | `src/varint.zig` | NEW | Unified varint encode/decode module |
 | `src/testing/page_builder.zig` | NEW | Test helper for constructing pages |
-| `src/encode_page.zig` | MODIFY | Use new varint API, delete old encoder |
+| `src/encode_page.zig` | NEW | Encoder using varint API |
 | `src/page.zig` | MODIFY | Streaming decoder, rewrite parse functions, owned payloads |
 | `src/pager_manager.zig` | MODIFY | Single cache, dirty tracking, simplify |
 | `src/cursor.zig` | MODIFY | Borrow from cached cell, overflow buffer |

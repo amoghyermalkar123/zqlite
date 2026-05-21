@@ -3,11 +3,17 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const tripwire_mod = b.createModule(.{
+        .root_source_file = b.path("tripwire/tripwire.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
 
     const mod = b.addModule("zsqlite", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
     });
+    mod.addImport("tripwire", tripwire_mod);
 
     const exe = b.addExecutable(.{
         .name = "zsqlite",
@@ -20,6 +26,7 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+    exe.root_module.addImport("tripwire", tripwire_mod);
 
     b.installArtifact(exe);
 
