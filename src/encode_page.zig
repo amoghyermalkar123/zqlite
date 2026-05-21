@@ -216,6 +216,7 @@ const std = @import("std");
 const cnst = @import("constants.zig");
 const varint = @import("varint.zig");
 const page = @import("page.zig");
+const PageBuilder = @import("testing/page_builder.zig").PageBuilder;
 
 const Allocator = std.mem.Allocator;
 const t = std.testing;
@@ -444,17 +445,12 @@ test "encode leaf page roundtrip parse" {
         .page_reserved_size = 0,
     };
 
-    const record1 = try encode_record(t.allocator, &.{.{ .String = "abc" }});
-    defer t.allocator.free(record1);
-    const record2 = try encode_record(t.allocator, &.{.{ .I16 = 42 }});
-    defer t.allocator.free(record2);
+    var builder = try PageBuilder.init(t.allocator, .Leaf, db_header);
+    defer builder.deinit();
+    try builder.addLeafCell(5, &.{.{ .String = "abc" }});
+    try builder.addLeafCell(6, &.{.{ .I16 = 42 }});
 
-    const cell1 = try encode_table_leaf_cell(t.allocator, db_header, 5, record1, null);
-    defer t.allocator.free(cell1);
-    const cell2 = try encode_table_leaf_cell(t.allocator, db_header, 6, record2, null);
-    defer t.allocator.free(cell2);
-
-    const page_buf = try encode_leaf_page(t.allocator, db_header, &.{ cell1, cell2 });
+    const page_buf = try builder.build();
     defer t.allocator.free(page_buf);
 
     var parsed = try page.parse_page(t.allocator, page_buf, 2, &db_header);
@@ -465,8 +461,8 @@ test "encode leaf page roundtrip parse" {
     try t.expectEqual(@as(u16, 2), parsed.Leaf.header.cell_count);
     try t.expectEqual(@as(i64, 5), parsed.Leaf.cells.items[0].row_id);
     try t.expectEqual(@as(i64, 6), parsed.Leaf.cells.items[1].row_id);
-    try t.expectEqualSlices(u8, record1, parsed.Leaf.cells.items[0].payload);
-    try t.expectEqualSlices(u8, record2, parsed.Leaf.cells.items[1].payload);
+    try t.expectEqualSlices(u8, &[_]u8{ 0x02, 0x13, 'a', 'b', 'c' }, parsed.Leaf.cells.items[0].payload);
+    try t.expectEqualSlices(u8, &[_]u8{ 0x02, 0x02, 0x00, 0x2A }, parsed.Leaf.cells.items[1].payload);
 }
 
 const tw = @import("tripwire").module(enum {

@@ -1,9 +1,10 @@
 const std = @import("std");
 const Io = std.Io;
-const Page = @import("page.zig");
-const parse_header = @import("page.zig").parse_header;
-const cnst = @import("constants.zig");
 const Allocator = std.mem.Allocator;
+
+const Page = @import("page.zig");
+const cnst = @import("constants.zig");
+const parse_header = Page.parse_header;
 
 pub const CachedPage = union(enum) {
     page: Page.Page,
@@ -131,9 +132,10 @@ fn load_overflow(self: *Self, n: usize) !Page.OverflowPage {
 }
 
 const t = std.testing;
+const PageBuilder = @import("testing/page_builder.zig").PageBuilder;
 
 test "load_page" {
-    var scratch: [8192]u8 = undefined;
+    var scratch: [32768]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&scratch);
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -143,34 +145,23 @@ test "load_page" {
     });
     defer file.close(t.io);
 
-    var full_page = [_]u8{0} ** 4096;
-    @memcpy(full_page[0..cnst.HEADER_PREFIX.len], cnst.HEADER_PREFIX);
-    full_page[16] = 0x10;
-    full_page[17] = 0x00; // page size = 4096
-    full_page[100] = 0x0D; // page type: SQLite table leaf page
-    full_page[101] = 0x00;
-    full_page[102] = 0x00; // first free block
-    full_page[103] = 0x00;
-    full_page[104] = 0x01; // cell count = 1
-    full_page[105] = 0x00;
-    full_page[106] = 0x74; // cell content offset = 116
-    full_page[107] = 0x00; // fragmented bytes count
-    full_page[108] = 0x00;
-    full_page[109] = 0x74; // one cell pointer -> absolute byte offset 116 in page 1
+    const db_header = Page.DbHeader{
+        .page_size = 4096,
+        .page_reserved_size = 0,
+    };
 
-    full_page[116] = 0x05; // varint: payload size = 5
-    full_page[117] = 0x01; // varint: row_id = 1
-    full_page[118] = 0xAA;
-    full_page[119] = 0xBB;
-    full_page[120] = 0xCC;
-    full_page[121] = 0xDD;
-    full_page[122] = 0xEE; // payload
+    var builder = try PageBuilder.init(fba.allocator(), .Leaf, db_header);
+    defer builder.deinit();
+    try builder.addLeafCell(1, &.{.{ .Blob = &[_]u8{ 0xAA, 0xBB, 0xCC, 0xDD, 0xEE } }});
+    const full_page = try builder.buildPageFile(1);
+    defer fba.allocator().free(full_page);
 
     var writer_buf: [256]u8 = undefined;
     var file_writer = file.writer(t.io, &writer_buf);
-    try file_writer.interface.writeAll(&full_page);
+    try file_writer.interface.writeAll(full_page);
 
     var pm = try Self.new(fba.allocator(), t.io, file);
+    defer pm.deinit();
 
     const page = try load_page(&pm, 1);
     try t.expectEqual(Page.PageType.Leaf, page.Leaf.header.page_type);
@@ -178,4 +169,40 @@ test "load_page" {
     try t.expectEqual(@as(usize, 1), page.Leaf.cells.items.len);
     try t.expectEqual(@as(i64, 1), page.Leaf.cells.items[0].row_id);
     try t.expectEqual(@as(usize, 4096), pm.page_size);
+}
+
+test "load_page from page 2 file image" {
+    var scratch: [49152]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&scratch);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var file = try tmp.dir.createFile(t.io, "data-page-2.bin", .{
+        .read = true,
+    });
+    defer file.close(t.io);
+
+    const db_header = Page.DbHeader{
+        .page_size = 4096,
+        .page_reserved_size = 0,
+    };
+
+    var builder = try PageBuilder.init(fba.allocator(), .Leaf, db_header);
+    defer builder.deinit();
+    try builder.addLeafCell(7, &.{.{ .String = "page2" }});
+    const file_image = try builder.buildPageFile(2);
+    defer fba.allocator().free(file_image);
+
+    var writer_buf: [256]u8 = undefined;
+    var file_writer = file.writer(t.io, &writer_buf);
+    try file_writer.interface.writeAll(file_image);
+
+    var pm = try Self.new(fba.allocator(), t.io, file);
+    defer pm.deinit();
+
+    const loaded = try load_page(&pm, 2);
+    try t.expectEqual(Page.PageType.Leaf, loaded.Leaf.header.page_type);
+    try t.expectEqual(@as(u16, 1), loaded.Leaf.header.cell_count);
+    try t.expectEqual(@as(usize, 1), loaded.Leaf.cells.items.len);
+    try t.expectEqual(@as(i64, 7), loaded.Leaf.cells.items[0].row_id);
 }

@@ -274,16 +274,16 @@ pub const Decoder = struct {
 
 ---
 
-### Phase 6: Rewrite all tests to use PageBuilder
+### [done] Phase 6: Rewrite all tests to use PageBuilder
 
-#### Step 6.1: Rewrite `page.zig` test `"parse_page_rest"`
+#### [done] Step 6.1: Rewrite `page.zig` test `"parse_page_rest"`
 
 - Remove all `buf[N] = 0xXX` raw byte assignments
 - Use PageBuilder to construct the page, parse, verify
 
 **Dependencies:** Step 5.5
 
-#### Step 6.2: Rewrite `page.zig` test `"parse_page"`
+#### [done] Step 6.2: Rewrite `page.zig` test `"parse_page"`
 
 - Remove all `buf[100] = 0x0D` etc. raw byte assignments
 - Use PageBuilder to construct the page, parse, verify
@@ -297,7 +297,7 @@ pub const Decoder = struct {
 
 **Dependencies:** Step 6.1
 
-#### Step 6.4: Update `encode_page.zig` tests
+#### [done] Step 6.4: Update `encode_page.zig` tests
 
 - Update tests to use `varint.decode` instead of `read_varint_at`
 - Replace raw byte page construction with PageBuilder in roundtrip test

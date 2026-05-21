@@ -401,6 +401,7 @@ pub fn parse_record_header(alloc: Allocator, cell_payload: []const u8) !RecordHe
 
 const t = std.testing;
 const encode_page = @import("encode_page.zig");
+const PageBuilder = @import("testing/page_builder.zig").PageBuilder;
 
 test "parse record header with multibyte type code" {
     const long_string = "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdef";
@@ -422,25 +423,12 @@ test "parse page 1 uses 100 byte header offset" {
         .page_reserved_size = 0,
     };
 
-    const record = try encode_page.encode_record(t.allocator, &.{.{ .String = "abc" }});
-    defer t.allocator.free(record);
+    var builder = try PageBuilder.init(t.allocator, .Leaf, db_header);
+    defer builder.deinit();
+    try builder.addLeafCell(5, &.{.{ .String = "abc" }});
 
-    const cell = try encode_page.encode_table_leaf_cell(t.allocator, db_header, 5, record, null);
-    defer t.allocator.free(cell);
-
-    const leaf_page = try encode_page.encode_leaf_page(t.allocator, db_header, &.{cell});
-    defer t.allocator.free(leaf_page);
-
-    const full_buf = try t.allocator.alloc(u8, cnst.HEADER_SIZE + leaf_page.len);
+    const full_buf = try builder.buildPageFile(1);
     defer t.allocator.free(full_buf);
-    @memset(full_buf, 0);
-    @memcpy(full_buf[cnst.HEADER_SIZE..], leaf_page);
-
-    const cell_ptr = std.mem.readInt(u16, full_buf[cnst.HEADER_SIZE + cnst.PAGE_LEAF_HEADER_SIZE ..][0..2], .big);
-    std.mem.writeInt(u16, full_buf[cnst.HEADER_SIZE + cnst.PAGE_LEAF_HEADER_SIZE ..][0..2], @intCast(cell_ptr + cnst.HEADER_SIZE), .big);
-
-    const content_offset = std.mem.readInt(u16, full_buf[cnst.HEADER_SIZE + cnst.PAGE_CELL_CONTENT_OFFSET ..][0..2], .big);
-    std.mem.writeInt(u16, full_buf[cnst.HEADER_SIZE + cnst.PAGE_CELL_CONTENT_OFFSET ..][0..2], @intCast(content_offset + cnst.HEADER_SIZE), .big);
 
     var pg = try parse_page(t.allocator, full_buf, 1, &db_header);
     defer t.allocator.free(pg.Leaf.cell_pointers);
@@ -449,5 +437,5 @@ test "parse page 1 uses 100 byte header offset" {
     try t.expectEqual(PageType.Leaf, pg.Leaf.header.page_type);
     try t.expectEqual(@as(u16, 1), pg.Leaf.header.cell_count);
     try t.expectEqual(@as(i64, 5), pg.Leaf.cells.items[0].row_id);
-    try t.expectEqualSlices(u8, record, pg.Leaf.cells.items[0].payload);
+    try t.expectEqualSlices(u8, &[_]u8{ 0x02, 0x13, 'a', 'b', 'c' }, pg.Leaf.cells.items[0].payload);
 }
