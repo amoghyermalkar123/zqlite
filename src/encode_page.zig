@@ -129,7 +129,8 @@ pub fn encode_record(alloc: Allocator, fields: []const RecordFieldEntry) ![]u8 {
     return record_buffer.toOwnedSlice(alloc);
 }
 
-// [payload_size varint][rowid varint][local payload bytes][overflow ptr?]
+/// [payload_size varint][rowid varint][local payload bytes][overflow ptr?]
+/// Copies record_payload internally and owns it
 pub fn encode_table_leaf_cell(alloc: Allocator, db_header: page.DbHeader, rowid: u64, record_payload: []const u8, first_ov_page: ?u32) ![]u8 {
     const payload_size = record_payload.len;
     const hd = page.PageHeader{
