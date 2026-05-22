@@ -306,9 +306,9 @@ pub const Decoder = struct {
 
 ---
 
-### Phase 7: Make cell payloads owned
+### [done] Phase 7: Make cell payloads owned
 
-#### Step 7.1: Update `parse_table_leaf_cell` to dupe the payload
+#### [done] Step 7.1: Update `parse_table_leaf_cell` to dupe the payload
 
 - After `decoder.readSlice(local_size)`, change to: `const payload = try alloc.dupe(u8, try decoder.readSlice(local_size))`
 - Add `errdefer alloc.free(payload)`
@@ -316,7 +316,7 @@ pub const Decoder = struct {
 
 **Dependencies:** Step 4.1
 
-#### Step 7.2: Update deinit paths to free cell payloads
+#### [done] Step 7.2: Update deinit paths to free cell payloads
 
 - In `pager_manager.zig:deinit`, when freeing a `TableLeafPage`, iterate over `cells.items` and `alloc.free(cell.payload)` for each cell
 
