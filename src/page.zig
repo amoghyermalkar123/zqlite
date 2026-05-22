@@ -4,6 +4,7 @@
 const std = @import("std");
 const cnst = @import("constants.zig");
 const Allocator = std.mem.Allocator;
+const Decoder = @import("decode_page.zig").Decoder;
 
 pub const OverflowPage = struct {
     next: ?usize,
@@ -73,6 +74,7 @@ pub const PageHeader = struct {
     rightmost_pointer: ?u32 = null,
 
     /// Compute local payload size
+    /// TODO: move this out of PageHeader container
     pub fn local_payload_size(self: *const @This(), db_header: DbHeader, payload_size: usize) !usize {
         switch (self.page_type) {
             .Interior => return error.NoPayloadSizeForInteriorPage,
@@ -96,6 +98,7 @@ pub const PageHeader = struct {
         }
     }
 
+    /// TODO: move this out of PageHeader container
     pub fn local_and_overflow_size(self: *const @This(), db_header: DbHeader, payload_size: usize) !struct { usize, ?usize } {
         const local = try self.local_payload_size(db_header, payload_size);
 
@@ -111,7 +114,7 @@ pub const PageHeader = struct {
 pub const TableLeafCell = struct {
     size: i64,
     row_id: i64,
-    payload: []const u8,
+    payload: []u8,
     first_overflow: ?usize,
 };
 
@@ -126,30 +129,6 @@ pub const PageType = enum(u8) {
     Interior = 0x05,
 };
 
-pub const Decoder = struct {
-    buffer: []const u8,
-
-    const Self = @This();
-
-    pub fn read_int(self: *const Self, index: usize, comptime T: type) !T {
-        var ix = index;
-        const int_size = @divExact(@typeInfo(T).int.bits, 8);
-        if (ix + int_size > self.buffer.len) return error.BufferExhausted;
-        defer ix += int_size;
-
-        return std.mem.readInt(T, self.buffer[ix .. ix + int_size][0..int_size], .big);
-    }
-
-    pub fn read_enum(self: *const Self, index: usize, comptime T: type) !T {
-        return std.enums.fromInt(T, try self.read_int(index, std.meta.Tag(T))) orelse error.InvalidEnumTag;
-    }
-
-    pub fn read_slice(self: *const Self, from: usize, len: usize) ![]const u8 {
-        if (from + len > self.buffer.len) return error.BufferExhausted;
-        return self.buffer[from .. from + len];
-    }
-};
-
 pub fn parse_overflow_page(alloc: Allocator, buffer: []const u8) !OverflowPage {
     const next_raw = std.mem.readInt(u32, buffer[0..4], .big);
 
@@ -161,12 +140,28 @@ pub fn parse_overflow_page(alloc: Allocator, buffer: []const u8) !OverflowPage {
     };
 }
 
+pub fn deinitPage(alloc: Allocator, page: *Page) void {
+    switch (page.*) {
+        .Leaf => |*leaf| deinitLeafPage(alloc, leaf),
+        .Interior => |*interior| {
+            alloc.free(interior.cell_pointers);
+            interior.cells.deinit(alloc);
+        },
+    }
+}
+
+pub fn deinitLeafPage(alloc: Allocator, leaf: *TableLeafPage) void {
+    for (leaf.cells.items) |cell| alloc.free(cell.payload);
+    alloc.free(leaf.cell_pointers);
+    leaf.cells.deinit(alloc);
+}
+
 pub fn parse_page(alloc: Allocator, buffer: []const u8, page_num: usize, db_header: *const DbHeader) !Page {
     const page_offset = if (page_num == 1) cnst.HEADER_SIZE else 0;
 
-    var decoder = Decoder{ .buffer = buffer };
+    var decoder = Decoder.initAt(buffer, page_offset);
 
-    const pt = try decoder.read_enum(page_offset, PageType);
+    const pt = try decoder.readEnum(PageType);
 
     if (pt != .Leaf and pt != .Interior) return error.UnknownPageType;
 
@@ -176,7 +171,7 @@ pub fn parse_page(alloc: Allocator, buffer: []const u8, page_num: usize, db_head
 fn parse_table_leaf_page(alloc: Allocator, decoder: *Decoder, page_offset: usize, db_header: *const DbHeader) !Page {
     const pg_hdr = try parse_page_header(decoder, page_offset);
     // parse cell pointers
-    const cell_pointers = try parse_cell_pointers(alloc, decoder, page_offset, pg_hdr.cell_count, switch (pg_hdr.page_type) {
+    const cell_pointers = try parse_cell_pointers(alloc, decoder.buffer, page_offset, pg_hdr.cell_count, switch (pg_hdr.page_type) {
         .Leaf => cnst.PAGE_LEAF_HEADER_SIZE,
         .Interior => cnst.PAGE_INTERIOR_HEADER_SIZE,
     });
@@ -186,7 +181,7 @@ fn parse_table_leaf_page(alloc: Allocator, decoder: *Decoder, page_offset: usize
         .Leaf => {
             var cells = try std.ArrayList(TableLeafCell).initCapacity(alloc, cell_pointers.len);
             for (cell_pointers) |cell_ptr| {
-                try cells.append(alloc, try parse_table_leaf_cell(decoder, cell_ptr, db_header, &pg_hdr));
+                try cells.append(alloc, try parse_table_leaf_cell(alloc, decoder.buffer, cell_ptr, db_header, &pg_hdr));
             }
 
             return Page{
@@ -200,7 +195,7 @@ fn parse_table_leaf_page(alloc: Allocator, decoder: *Decoder, page_offset: usize
         .Interior => {
             var cells = try std.ArrayList(TableInteriorCell).initCapacity(alloc, cell_pointers.len);
             for (cell_pointers) |cell_ptr| {
-                try cells.append(alloc, try parse_table_internal_cell(decoder, cell_ptr));
+                try cells.append(alloc, try parse_table_internal_cell(decoder.buffer, cell_ptr));
             }
 
             return Page{
@@ -215,13 +210,15 @@ fn parse_table_leaf_page(alloc: Allocator, decoder: *Decoder, page_offset: usize
 }
 
 pub fn parse_page_header(decoder: *Decoder, page_offset: usize) !PageHeader {
-    const pt = try decoder.read_enum(page_offset, PageType);
+    decoder.seekTo(page_offset);
+
+    const pt = try decoder.readEnum(PageType);
     if (pt != .Leaf and pt != .Interior) return error.InvalidPageType;
 
-    const first_free_block = try decoder.read_int(page_offset + cnst.PAGE_FIRST_FREEBLOCK_OFFSET, u16);
-    const cell_count_offset = try decoder.read_int(page_offset + cnst.PAGE_CELL_COUNT_OFFSET, u16);
-    var cell_content_offset = @as(u32, try decoder.read_int(page_offset + cnst.PAGE_CELL_CONTENT_OFFSET, u16));
-    const fragmented_byts_count = try decoder.read_int(page_offset + cnst.PAGE_FRAGMENTED_BYTES_COUNT_OFFSET, u8);
+    const first_free_block = try decoder.readInt(u16);
+    const cell_count_offset = try decoder.readInt(u16);
+    var cell_content_offset = @as(u32, try decoder.readInt(u16));
+    const fragmented_byts_count = try decoder.readInt(u8);
 
     if (cell_content_offset == 0) cell_content_offset = 65536;
 
@@ -231,93 +228,61 @@ pub fn parse_page_header(decoder: *Decoder, page_offset: usize) !PageHeader {
         .cell_content_offset = cell_content_offset,
         .cell_count = cell_count_offset,
         .first_free_block = first_free_block,
-        .rightmost_pointer = if (pt == .Interior) try decoder.read_int(page_offset + cnst.PAGE_LEAF_HEADER_SIZE, u32) else null,
+        .rightmost_pointer = if (pt == .Interior) try decoder.readInt(u32) else null,
     };
 }
 
 // caller owns the returned slice
-fn parse_cell_pointers(alloc: Allocator, decoder: *const Decoder, page_offset: usize, n: usize, header_size: usize) ![]u16 {
+fn parse_cell_pointers(alloc: Allocator, raw_buf: []const u8, page_offset: usize, n: usize, header_size: usize) ![]u16 {
+    var decoder = Decoder.initAt(raw_buf, page_offset + header_size);
+
     var pointers = try std.ArrayList(u16).initCapacity(alloc, n);
     errdefer pointers.deinit(alloc);
 
-    for (0..n) |ix| {
+    for (0..n) |_| {
         // absolute positions of the pointers of the cells need to be pushed to the array
-        try pointers.append(alloc, try decoder.read_int(page_offset + header_size + 2 * ix, u16));
+        try pointers.append(alloc, try decoder.readInt(u16));
     }
 
     return pointers.toOwnedSlice(alloc);
 }
 
-fn parse_table_leaf_cell(decoder: *Decoder, cell_ptr: u16, db_header: *const DbHeader, page_header: *const PageHeader) !TableLeafCell {
-    const size_result = try read_varint_at(decoder, cell_ptr);
-    const row_id_offset = cell_ptr + size_result.n;
-    const row_id_result = try read_varint_at(decoder, row_id_offset);
-    const payload_offset = row_id_offset + row_id_result.n;
+fn parse_table_leaf_cell(alloc: Allocator, raw_buf: []const u8, cell_ptr: u16, db_header: *const DbHeader, page_header: *const PageHeader) !TableLeafCell {
+    var decoder = Decoder.initAt(raw_buf, cell_ptr);
 
-    const sizes = try page_header.local_and_overflow_size(db_header.*, @intCast(size_result.res));
+    const payload_size = try decoder.readVarint();
+    const rowId = try decoder.readVarint();
+
+    const sizes = try page_header.local_and_overflow_size(db_header.*, @intCast(payload_size.value));
     const local_size = sizes[0];
     const overflow_size = sizes[1];
 
-    const payload = try decoder.read_slice(payload_offset, local_size);
+    const borrowed = try decoder.readSlice(local_size);
+    const payload = try alloc.dupe(u8, borrowed);
+    errdefer alloc.free(payload);
 
     // pointer to the first overflow page
     const first_overflow = if (overflow_size != null)
-        @as(usize, try decoder.read_int(payload_offset + local_size, u32))
+        @as(usize, try decoder.readInt(u32))
     else
         null;
 
     return TableLeafCell{
         .payload = payload,
-        .row_id = row_id_result.res,
-        .size = size_result.res,
+        .row_id = @intCast(rowId.value),
+        .size = @intCast(payload_size.value),
         .first_overflow = first_overflow,
     };
 }
 
-fn parse_table_internal_cell(decoder: *Decoder, cell_ptr: u16) !TableInteriorCell {
-    const left_child_page = try decoder.read_int(cell_ptr, u32);
-    const key_res = try read_varint_at(decoder, cell_ptr + 4);
+fn parse_table_internal_cell(raw_buf: []const u8, cell_ptr: u16) !TableInteriorCell {
+    var decoder = Decoder.initAt(raw_buf, cell_ptr);
+    const left_child_page = try decoder.readInt(u32);
+    const key_res = try decoder.readVarint();
 
     return TableInteriorCell{
         .left_child_page = left_child_page,
-        .key = key_res.res,
-    };
-}
-
-// docs can be found for this in docs/varint.md
-pub fn read_varint_at(decoder: *Decoder, offset: usize) !struct { n: u8, res: i64 } {
-    var bytes_read: u8 = 0;
-    var result: i64 = 0;
-    var ofs = offset;
-
-    // sqlite varint is 9 bytes long
-    while (bytes_read < 9) {
-        const current_byte = @as(i64, try decoder.read_int(ofs, u8));
-
-        if (bytes_read == 8) {
-            // this shifts 8 bits to the left in result,
-            // moves bits from cur_byte to result
-            // since this is the last byte, all bits represent info
-            // there is no control bit in here hence no masking required
-            result = (result << 8) | current_byte;
-        } else {
-            // masking is basically for removing the control bit
-            // shifting bits is for making space for the new bits of the cur_byte
-            // remember, result is a 64 bit integer
-            result = (result << 7) | (current_byte & 0b0111_1111);
-        }
-
-        ofs += 1;
-        bytes_read += 1;
-
-        // stop at last byte
-        // this is indicated by the continuation bit being set to 0
-        if (current_byte & 0b1000_0000 == 0) break;
-    }
-
-    return .{
-        .n = bytes_read,
-        .res = result,
+        .key = @intCast(key_res.value),
     };
 }
 
@@ -389,31 +354,31 @@ pub const RecordHeader = struct {
 //              >=13 odd  -> String of size (N-13)/2
 //
 pub fn parse_record_header(alloc: Allocator, cell_payload: []const u8) !RecordHeader {
-    var decoder = Decoder{ .buffer = cell_payload };
+    var decoder = Decoder.init(cell_payload);
     // let's read the record header
-    const header_data = try read_varint_at(&decoder, 0);
+    // first we read the header_size varint
+    const headerSize = try decoder.readVarint();
     // byte width of the `Header Size` varint itself
     // the value of this is the starting offset in the header buffer
     // from where we can start reading the type code values
-    var record_header_cursor = header_data.n;
+    var record_header_cursor = headerSize.len;
     // this gives us the entire length of the record header
     // the value of this is the starting offset from where
     // we can start reading the field data i.e. the actual
     // fields payload
-    var field_payload_cursor: usize = @intCast(header_data.res);
-
+    var field_payload_cursor: usize = @intCast(headerSize.value);
+    // TODO: can the mem alloc get better here?
     var fields = try std.ArrayList(RecordField).initCapacity(alloc, 10);
     errdefer fields.deinit(alloc);
-
-    while (@as(i64, record_header_cursor) < header_data.res) {
+    while (@as(i64, record_header_cursor) < headerSize.value) {
         // we read the discriminant here, i.e. the field information
         // stored in the record header
-        const discr_data = try read_varint_at(&decoder, record_header_cursor);
+        const typeCode = try decoder.readVarint();
         // the size of the header bytes read, this is the value
         // we advance our record header cursor by
-        record_header_cursor += discr_data.n;
+        record_header_cursor += typeCode.len;
         // now parse the actual type of the field as indicated by the value of the type code we just read
-        const field_data: struct { field_type: RecordFieldType, field_size: usize } = switch (discr_data.res) {
+        const columnFieldData: struct { field_type: RecordFieldType, field_size: usize } = switch (typeCode.value) {
             0 => .{ .field_type = RecordFieldType.Null, .field_size = 0 },
             1 => .{ .field_type = RecordFieldType.I8, .field_size = 1 },
             2 => .{ .field_type = RecordFieldType.I16, .field_size = 2 },
@@ -425,105 +390,69 @@ pub fn parse_record_header(alloc: Allocator, cell_payload: []const u8) !RecordHe
             8 => .{ .field_type = RecordFieldType.Zero, .field_size = 0 },
             9 => .{ .field_type = RecordFieldType.One, .field_size = 0 },
             else => blk: {
-                if (discr_data.res >= 12 and @rem(discr_data.res, 2) == 0) {
-                    const sz: usize = @intCast(@divTrunc(discr_data.res - 12, 2));
+                if (typeCode.value >= 12 and @rem(typeCode.value, 2) == 0) {
+                    const sz: usize = @intCast(@divTrunc(typeCode.value - 12, 2));
                     break :blk .{ .field_type = .{ .Blob = sz }, .field_size = sz };
                 }
 
-                if (discr_data.res >= 13 and @rem(discr_data.res, 2) == 1) {
-                    const sz: usize = @intCast(@divTrunc(discr_data.res - 13, 2));
+                if (typeCode.value >= 13 and @rem(typeCode.value, 2) == 1) {
+                    const sz: usize = @intCast(@divTrunc(typeCode.value - 13, 2));
                     break :blk .{ .field_type = .{ .String = sz }, .field_size = sz };
                 }
 
                 return error.UnsupportedRecordFieldType;
             },
         };
-
+        // TODO: is type coercion possible here?
         try fields.append(alloc, .{
-            .field_type = field_data.field_type,
+            .field_type = columnFieldData.field_type,
             .offset = field_payload_cursor,
         });
-
         // we've decoded the field, now since the types of the field are a great
         // way to understand their sizes, we can advance the field payload cursor
         // by the size of the type of the field i.e. 1 for I8, 2 for I16, etc.
-        field_payload_cursor += field_data.field_size;
+        field_payload_cursor += columnFieldData.field_size;
     }
 
     return .{ .fields = try fields.toOwnedSlice(alloc) };
 }
 
 const t = std.testing;
+const encode_page = @import("encode_page.zig");
+const PageBuilder = @import("testing/page_builder.zig").PageBuilder;
 
-fn page_encoder() []const u8 {}
+test "parse record header with multibyte type code" {
+    const long_string = "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdef";
+    const record = try encode_page.encode_record(t.allocator, &.{.{ .String = long_string }});
+    defer t.allocator.free(record);
 
-test "parse_page_rest" {
-    var buf = [_]u8{0} ** 123;
-    const db_header = DbHeader{
-        .page_size = 4096,
-        .page_reserved_size = 0,
-    };
-    buf[0] = 0x0D;
-    buf[1] = 0x00;
-    buf[2] = 0x00; // first free block
-    buf[3] = 0x00;
-    buf[4] = 0x01; // cell count = 1
-    buf[5] = 0x00;
-    buf[6] = 0x10; // cell content offset
-    buf[7] = 0x00; // fragmented bytes count
-    buf[8] = 0x00;
-    buf[9] = 0x10; // first cell pointer
-    buf[16] = 0x10; // first cell pointer
-    buf[16] = 0x03; // varint: payload size = 3
-    buf[17] = 0x05; // varint: row_id = 5
-    buf[18] = 0x11; // payload byte 1
-    buf[19] = 0x22; // payload byte 2
-    buf[20] = 0x33; // payload byte 3
-    var pg = try parse_page(t.allocator, &buf, 2, &db_header); // page 2, no header offset
-    defer t.allocator.free(pg.Leaf.cell_pointers);
-    defer pg.Leaf.cells.deinit(t.allocator);
-    try t.expectEqual(PageType.Leaf, pg.Leaf.header.page_type);
-    try t.expectEqual(@as(u16, 1), pg.Leaf.header.cell_count);
-    try t.expectEqual(@as(u16, 16), pg.Leaf.cell_pointers[0]);
-    try t.expectEqual(@as(i64, 3), pg.Leaf.cells.items[0].size);
-    try t.expectEqual(@as(i64, 5), pg.Leaf.cells.items[0].row_id);
-    try t.expectEqualSlices(u8, &[_]u8{ 0x11, 0x22, 0x33 }, pg.Leaf.cells.items[0].payload);
+    const header = try parse_record_header(t.allocator, record);
+    defer t.allocator.free(header.fields);
+
+    try t.expectEqual(@as(usize, 1), header.fields.len);
+    try t.expectEqual(@as(std.meta.Tag(RecordFieldType), .String), @as(std.meta.Tag(RecordFieldType), header.fields[0].field_type));
+    try t.expectEqual(@as(usize, 3), header.fields[0].offset);
+    try t.expectEqualSlices(u8, long_string, record[header.fields[0].offset .. header.fields[0].end_offset()]);
 }
 
-// TODO: change this test to use an encoder instead of defining a raw byte array
-test "parse_page" {
-    var buf = [_]u8{0} ** 123;
+test "parse page 1 uses 100 byte header offset" {
     const db_header = DbHeader{
-        .page_size = 4096,
+        .page_size = 512,
         .page_reserved_size = 0,
     };
-    buf[100] = 0x0D; // page type: SQLite table leaf page
-    buf[101] = 0x00;
-    buf[102] = 0x00; // first free block
-    buf[103] = 0x00;
-    buf[104] = 0x01; // cell count = 1
-    buf[105] = 0x00;
-    buf[106] = 0x74; // cell content offset = 116
-    buf[107] = 0x00; // fragmented bytes count
-    buf[108] = 0x00;
-    buf[109] = 0x74; // one cell pointer -> absolute byte offset 116 in page 1
-    buf[116] = 0x05; // varint: payload size = 5
-    buf[117] = 0x01; // varint: row_id = 1
-    buf[118] = 0xAA;
-    buf[119] = 0xBB;
-    buf[120] = 0xCC;
-    buf[121] = 0xDD;
-    buf[122] = 0xEE; // payload
 
-    var pg = try parse_page(t.allocator, &buf, 1, &db_header);
-    defer t.allocator.free(pg.Leaf.cell_pointers);
-    defer pg.Leaf.cells.deinit(t.allocator);
+    var builder = try PageBuilder.init(t.allocator, .Leaf, db_header);
+    defer builder.deinit();
+    try builder.addLeafCell(5, &.{.{ .String = "abc" }});
+
+    const full_buf = try builder.buildPageFile(1);
+    defer t.allocator.free(full_buf);
+
+    var pg = try parse_page(t.allocator, full_buf, 1, &db_header);
+    defer deinitPage(t.allocator, &pg);
+
     try t.expectEqual(PageType.Leaf, pg.Leaf.header.page_type);
     try t.expectEqual(@as(u16, 1), pg.Leaf.header.cell_count);
-    try t.expectEqual(@as(usize, 1), pg.Leaf.cell_pointers.len);
-    try t.expectEqual(@as(u16, 116), pg.Leaf.cell_pointers[0]);
-    try t.expectEqual(@as(usize, 1), pg.Leaf.cells.items.len);
-    try t.expectEqual(@as(i64, 5), pg.Leaf.cells.items[0].size);
-    try t.expectEqual(@as(i64, 1), pg.Leaf.cells.items[0].row_id);
-    try t.expectEqualSlices(u8, &[_]u8{ 0xAA, 0xBB, 0xCC, 0xDD, 0xEE }, pg.Leaf.cells.items[0].payload);
+    try t.expectEqual(@as(i64, 5), pg.Leaf.cells.items[0].row_id);
+    try t.expectEqualSlices(u8, &[_]u8{ 0x02, 0x13, 'a', 'b', 'c' }, pg.Leaf.cells.items[0].payload);
 }
