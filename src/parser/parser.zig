@@ -25,21 +25,77 @@ const ParserState = struct {
     // parse_statement parses a sql statement
     // cotrm
     fn parse_statement(self: *Self, alloc: Allocator) !ast.Statement {
-        const next = self.peek() orelse return error.UnexpectedEndOfInput;
+        switch (self.peek() orelse return error.UnexpectedEndOfInput) {
+            .Select => return .{ .Select = try self.parse_select(alloc) },
+            .Create => return .{ .CreateTable = try self.parse_create_table(alloc) },
+            .Insert => return .{ .Insert = try self.parse_insert(alloc) },
+            else => return error.UnexpectedToken,
+        }
+        unreachable;
+    }
 
-        if (next == Token.Select) {
-            return .{
-                .Select = try self.parse_select(alloc),
-            };
+    fn parse_insert(self: *Self, alloc: Allocator) !ast.Insert.InsertStatement {
+        _ = try self.expectNextTokenEq(Token.Insert);
+        _ = try self.expectNextTokenEq(Token.Into);
+
+        const table_name = try self.expectIdentifier();
+
+        const columns: ?[]const []const u8 = if (self.nextTokenIs(Token.Lpar))
+            try self.parse_column_list(alloc)
+        else
+            null;
+
+        _ = try self.expectNextTokenEq(Token.Values);
+        _ = try self.expectNextTokenEq(Token.Lpar);
+        const values = try self.parse_literal_list(alloc);
+        _ = try self.expectNextTokenEq(Token.Rpar);
+
+        return .{
+            .table = table_name,
+            .columns = columns,
+            .values = values,
+        };
+    }
+
+    fn parse_column_list(self: *Self, alloc: Allocator) ![]const []const u8 {
+        _ = try self.expectNextTokenEq(Token.Lpar);
+
+        var names = try std.ArrayList([]const u8).initCapacity(alloc, 1);
+        errdefer names.deinit(alloc);
+
+        try names.append(alloc, try self.expectIdentifier());
+
+        while (self.nextTokenIs(Token.Comma)) {
+            self.advance();
+            try names.append(alloc, try self.expectIdentifier());
         }
 
-        if (next == Token.Create) {
-            return .{
-                .CreateTable = try self.parse_create_table(alloc),
-            };
+        _ = try self.expectNextTokenEq(Token.Rpar);
+        return try names.toOwnedSlice(alloc);
+    }
+
+    fn parse_literal_list(self: *Self, alloc: Allocator) ![]ast.Insert.Literal {
+        var literals = try std.ArrayList(ast.Insert.Literal).initCapacity(alloc, 1);
+        errdefer literals.deinit(alloc);
+
+        try literals.append(alloc, try self.parse_literal(alloc));
+
+        while (self.nextTokenIs(Token.Comma)) {
+            self.advance();
+            try literals.append(alloc, try self.parse_literal(alloc));
         }
 
-        return error.UnexpectedToken;
+        return try literals.toOwnedSlice(alloc);
+    }
+
+    fn parse_literal(self: *Self, alloc: Allocator) !ast.Insert.Literal {
+        const tkn = self.nextToken() orelse return error.UnexpectedEndOfInput;
+        return switch (tkn) {
+            .Null => .Null,
+            .Integer => |n| .{ .Integer = n },
+            .StringLiteral => |s| .{ .String = try alloc.dupe(u8, s) },
+            else => error.UnexpectedToken,
+        };
     }
 
     // parses a create table statement
@@ -231,28 +287,44 @@ pub const ParseResult = struct {
         // Free identifier strings inside tokens
         for (self.tokens) |tok| {
             switch (tok) {
-                .Identifier => |ident| self.alloc.free(ident),
+                .Identifier, .StringLiteral => |s| self.alloc.free(s),
                 else => {},
             }
         }
         // Free the token slice itself
         self.alloc.free(self.tokens);
         // Free the result_columns ArrayList
-        switch (self.statement) {
-            .Select => |*sel| sel.core.result_columns.deinit(self.alloc),
-            .CreateTable => |*crt| {
-                self.alloc.free(crt.cols);
-            },
-        }
+        deinitStatement(self.alloc, self.statement);
     }
 };
+
+fn deinitStatement(alloc: Allocator, statement: ast.Statement) void {
+    var stmt = statement;
+    switch (stmt) {
+        .Select => |*sel| sel.core.result_columns.deinit(alloc),
+        .CreateTable => |crt| {
+            for (crt.cols) |c| alloc.free(c.name);
+            alloc.free(crt.cols);
+        },
+        .Insert => |ins| {
+            if (ins.columns) |cols| alloc.free(cols);
+            for (ins.values) |lit| {
+                switch (lit) {
+                    .String => |s| alloc.free(s),
+                    else => {},
+                }
+            }
+            alloc.free(ins.values);
+        },
+    }
+}
 
 pub fn parse_statement(input: []const u8, alloc: Allocator, trailing_semicolon: bool) !ParseResult {
     const tokens = try token.tokenize(alloc, input);
     errdefer {
         for (tokens) |tk| {
             switch (tk) {
-                .Identifier => |idn| alloc.free(idn),
+                .Identifier, .StringLiteral => |s| alloc.free(s),
                 else => {},
             }
         }
@@ -260,9 +332,14 @@ pub fn parse_statement(input: []const u8, alloc: Allocator, trailing_semicolon: 
     }
     var parser = ParserState.init(tokens);
     const statement = try parser.parse_statement(alloc);
+    errdefer deinitStatement(alloc, statement);
+
     if (trailing_semicolon) {
         _ = try parser.expectNextTokenEq(Token.Semicolon);
+    } else if (parser.peek() != null) {
+        return error.UnexpectedToken;
     }
+
     return .{
         .statement = statement,
         .tokens = tokens,
@@ -281,4 +358,52 @@ pub fn parse_create_statement(input: []const u8, alloc: Allocator) !ParseResult 
         .tokens = tokens,
         .alloc = alloc,
     };
+}
+
+const t = std.testing;
+
+test "parse insert without column list" {
+    var parsed = try parse_statement("insert into users values (1, 'alice')", t.allocator, false);
+    defer parsed.deinit();
+
+    const ins = parsed.statement.Insert;
+    try t.expectEqualStrings("users", ins.table);
+    try t.expect(ins.columns == null);
+    try t.expectEqual(@as(usize, 2), ins.values.len);
+    try t.expect(ins.values[0] == .Integer);
+    try t.expectEqual(@as(i64, 1), ins.values[0].Integer);
+    try t.expect(ins.values[1] == .String);
+    try t.expectEqualStrings("alice", ins.values[1].String);
+}
+
+test "parse insert with column list" {
+    var parsed = try parse_statement("insert into users (name, id) values ('bob', 2)", t.allocator, false);
+    defer parsed.deinit();
+
+    const ins = parsed.statement.Insert;
+    try t.expectEqualStrings("users", ins.table);
+    try t.expect(ins.columns != null);
+    try t.expectEqual(@as(usize, 2), ins.columns.?.len);
+    try t.expectEqualStrings("name", ins.columns.?[0]);
+    try t.expectEqualStrings("id", ins.columns.?[1]);
+    try t.expectEqualStrings("bob", ins.values[0].String);
+    try t.expectEqual(@as(i64, 2), ins.values[1].Integer);
+}
+
+test "parse insert with null literal" {
+    var parsed = try parse_statement("insert into t values (null)", t.allocator, false);
+    defer parsed.deinit();
+
+    try t.expect(parsed.statement.Insert.values[0] == .Null);
+}
+
+test "parse insert with trailing semicolon" {
+    var parsed = try parse_statement("insert into t values (1);", t.allocator, true);
+    defer parsed.deinit();
+
+    try t.expect(parsed.statement.Insert.values[0] == .Integer);
+}
+
+test "parse insert rejects extra tokens" {
+    try t.expectError(error.UnexpectedToken, parse_statement("insert into t values (1) from x", t.allocator, false));
 }

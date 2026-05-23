@@ -68,7 +68,7 @@ Add end-to-end support for `INSERT INTO` so the CLI can insert rows into user ta
 - **Rowid:** 64-bit integer key in leaf cell; no `AUTOINCREMENT` metadata in MVP—always scan for max.
 - **Cell order:** New cell inserted in **ascending `rowid` order** on the leaf page (SQLite invariant).
 - **Page encoding:** Rebuild full leaf page with `encode_leaf_page` from all cell byte slices (existing cells + new cell), not incremental patch of raw bytes.
-- **Cache:** After write, update `bufs` raw slice and invalidate or re-parse `pages` entry for that page number.
+- **Cache (Phase 6+):** After any write, update the raw slice in `bufs` and **invalidate** (remove) the `pages` entry for that page number so it will be re-parsed on the next read—do not re-parse into `pages` inside `write_raw_page`. This decision is locked for safety; see Risk Register.
 
 ---
 
@@ -139,19 +139,20 @@ In `tokenize` `else` branch, if first char is digit or `-`, scan integer with `s
 
 - MVP: decimal integers only
 - Reject bare `+` unless you add it explicitly
+- Match on `parseInt` result: map `error.Overflow` to `TokenizeError.IntegerOverflow` (clear “integer overflow” path); other parse failures stay `InvalidNumber`
 
-**Tests:** `42`, `-1`, reject `12.34` with clear error (or defer float to later)
+**Tests:** `42`, `-1`; `9223372036854775808` (i64 max + 1) → `error.IntegerOverflow` (float literals deferred)
 
 **Dependencies:** Step 1.1
 
 #### Step 1.4: Quoted string literals
 
-Handle `'` … `'` with SQLite-style doubling: `'it''s'` → `it's`.
+Handle `'` … `'` (MVP: no `''` escape inside strings; add SQLite doubling later).
 
 - Do not treat quoted text as `Identifier`
 - Return `Token.StringLiteral` with owned content
 
-**Tests:** empty string `''`, escaped quote, reject unterminated string
+**Tests:** empty string `''`, simple `'alice'`, reject unterminated string
 
 **Dependencies:** Step 1.1
 
@@ -344,14 +345,21 @@ Use existing `Scanner` starting at `table.first_page`:
 
 #### Step 5.2: Collect existing leaf cells as byte slices
 
-For target leaf page:
+**Pre-check (before any mutation or re-encode):** Load the table root via `table.first_page` and inspect `PageHeader`:
+
+- `page_type` must be `PageType.Leaf` (`0x0D`)
+- `rightmost_pointer` must be absent or zero (`null` on parsed leaf, or `0` if present)
+
+If either check fails, return `error.UnsupportedInsert` immediately with a message that multi-page tables are not supported in the MVP—do not scan cells, re-encode, or allocate a new cell.
+
+For target leaf page (after pre-check passes):
 
 - Read parsed `TableLeafPage`
 - For each cell, re-encode with existing `row_id` and payload OR keep original encoded bytes if you store them (re-encode is simpler but must preserve overflow pointers)
 
 MVP shortcut: only support tables whose **data** root is a **single leaf page** with all rows (common for small test DBs). Document limitation in plan progress notes.
 
-**Tests:** read `testdata/users.db` leaf page, roundtrip cell count unchanged after re-encode without insert
+**Tests:** read `testdata/users.db` leaf page, roundtrip cell count unchanged after re-encode without insert; fixture with interior root → `error.UnsupportedInsert`
 
 **Dependencies:** `encode_table_leaf_cell`, `encode_leaf_page`
 
@@ -381,7 +389,7 @@ If `encode_leaf_page` returns `PageTooSmall`, propagate `error.PageFull` (handle
 
 - Assert `bytes.len == page_size`
 - Copy into `bufs` entry (allocate if missing)
-- Remove or invalidate parsed entry in `pages` for that page number
+- Invalidate (remove) the `pages` entry for that page number (free parsed/overflow owned data); next `read_page` / `read_overflow` re-parses from `bufs`—do not parse in `write_raw_page`
 
 **Dependencies:** None
 

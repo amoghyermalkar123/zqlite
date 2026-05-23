@@ -21,6 +21,7 @@ pub const Planner = struct {
         return switch (statement) {
             .Select => |s| try self.compile_select(s),
             .CreateTable => error.UnsupportedStatement,
+            .Insert => error.UnsupportedStatement,
         };
     }
 

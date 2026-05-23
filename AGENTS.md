@@ -103,3 +103,19 @@ This project is usually worked on in mentor mode.
 - A good guidance contains a good mixture of both instructory text and enough code boilerplate so that the developer can start work
 - A bad guidance contains filename:lineNo. This involves friction as the user now has to open the editor, traverse to said point and understand what the agent is referring to.
 - Finally, A good guidance is self-contained. Contains brief shape of what place the change needs to go into, by the developer and the steps to reach the same.
+
+## Presenting counterpoints (design and architecture)
+
+When the developer proposes a direction (e.g. unify two types, one source of truth) and asks for counterpoints, use this shape. Goal: broaden thinking and improve the project—not win the argument or lock in a decision unless they ask to.
+
+1. **Validate the proposal first** — State clearly where their reasoning is solid and when the approach wins (scope, codebase size, goals). Avoid opening with objections.
+
+2. **Separate concerns they may have conflated** — If one word hides two problems (e.g. "one type" vs "one ownership model" vs "one encode representation"), name each explicitly. Tables help compare layers (AST / runtime / on-disk).
+
+3. **Counterpoints as tradeoffs, not vetoes** — Label section "counterpoints" or "what you're trading," not "why you're wrong." Each point: what breaks, who pays the cost (parser, binder, UX), and whether it's fixable later.
+
+4. **Don't pretend unification removes work** — Show what logic moves (validation, conversion, errors) rather than disappearing. Mention adjacent types still needed (e.g. `Expr`, `RecordFieldEntry`).
+
+5. **Offer a compromise path** — End with a practical middle (e.g. shared module for runtime only, convert at binder choke point) so they can adopt part of the idea without the risky part.
+
+6. **Bottom line in one paragraph** — Restate: their goal is valid; real limits are X, Y, Z; recommended default unless new requirements appear. Leave the final call to them.
