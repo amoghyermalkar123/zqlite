@@ -12,8 +12,8 @@ Add end-to-end support for `INSERT INTO` so the CLI can insert rows into user ta
 
 ## Phases
 
-1. Lexer and literal tokens (keywords, numbers, quoted strings, `NULL`)
-2. AST and parser for `INSERT INTO`
+1. [done] Lexer and literal tokens (keywords, numbers, quoted strings, `NULL`)
+2. [done] AST and parser for `INSERT INTO` (parse tests; column-count validation deferred to Phase 3)
 3. Value binding: SQL literals → `RecordFieldEntry` using table metadata
 4. Execution operator and planner wiring
 5. Rowid allocation and leaf-page mutation (in-memory)
@@ -22,6 +22,16 @@ Add end-to-end support for `INSERT INTO` so the CLI can insert rows into user ta
 8. B-tree growth: page full, splits, new pages (stretch)
 9. CLI integration and integration tests
 10. Cleanup, docs, and optional syntax extensions
+
+### Progress snapshot (2026-05-22)
+
+| Phase | Status | Notes |
+|-------|--------|--------|
+| 1 | **Done** | `token.zig`: keywords, integers (+ overflow), strings (no `''` escape), INSERT-shaped tests |
+| 2 | **Done** | `ast/insert.zig`, `parse_insert`, `ParseResult.deinit`; parser tests except column-count (Phase 3) |
+| 3–10 | **Not started** | No `bind.zig`, `insert.zig`, `Plan` union, pager write path, CLI insert path |
+
+**Next up:** Phase 3 (`bind_insert_values`) → Phase 4 (`Plan` + `compile_insert` stub).
 
 ---
 
@@ -113,9 +123,9 @@ ASCII: one insert through the stack
 
 ## Detailed Steps
 
-### Phase 1: Lexer and literal tokens
+### [done] Phase 1: Lexer and literal tokens
 
-#### Step 1.1: Extend `Token` enum
+#### [done] Step 1.1: Extend `Token` enum
 
 Add tokens (names can match existing style):
 
@@ -125,7 +135,7 @@ Add tokens (names can match existing style):
 
 **Dependencies:** None
 
-#### Step 1.2: Keyword recognition in `tokenize`
+#### [done] Step 1.2: Keyword recognition in `tokenize`
 
 Map `insert`, `into`, `values`, `null` to keyword tokens (same pattern as `select` / `from`).
 
@@ -133,7 +143,7 @@ Map `insert`, `into`, `values`, `null` to keyword tokens (same pattern as `selec
 
 **Dependencies:** Step 1.1
 
-#### Step 1.3: Numeric literals
+#### [done] Step 1.3: Numeric literals
 
 In `tokenize` `else` branch, if first char is digit or `-`, scan integer with `std.fmt.parseInt(i64, …)`.
 
@@ -145,7 +155,7 @@ In `tokenize` `else` branch, if first char is digit or `-`, scan integer with `s
 
 **Dependencies:** Step 1.1
 
-#### Step 1.4: Quoted string literals
+#### [done] Step 1.4: Quoted string literals
 
 Handle `'` … `'` (MVP: no `''` escape inside strings; add SQLite doubling later).
 
@@ -156,7 +166,7 @@ Handle `'` … `'` (MVP: no `''` escape inside strings; add SQLite doubling late
 
 **Dependencies:** Step 1.1
 
-#### Step 1.5: Tokenizer tests module
+#### [done] Step 1.5: Tokenizer tests module
 
 Expand `src/parser/token.zig` tests (or add `src/parser/token_test.zig`) covering INSERT-shaped inputs end-to-end at token level.
 
@@ -164,9 +174,9 @@ Expand `src/parser/token.zig` tests (or add `src/parser/token_test.zig`) coverin
 
 ---
 
-### Phase 2: AST and parser
+### [done] Phase 2: AST and parser
 
-#### Step 2.1: Add `ast/insert.zig`
+#### [done] Step 2.1: Add `ast/insert.zig`
 
 Define:
 
@@ -186,13 +196,13 @@ pub const Literal = union(enum) {
 
 **Dependencies:** None
 
-#### Step 2.2: Extend `ast.Statement` union
+#### [done] Step 2.2: Extend `ast.Statement` union
 
 Add `Insert: InsertStatement` beside `Select` and `CreateTable`.
 
 **Dependencies:** Step 2.1
 
-#### Step 2.3: Implement `parse_insert` in `parser.zig`
+#### [done] Step 2.3: Implement `parse_insert` in `parser.zig`
 
 Grammar (MVP):
 
@@ -217,23 +227,25 @@ Flow:
 
 **Dependencies:** Phase 1, Step 2.2
 
-#### Step 2.4: Wire `parse_statement` and `ParseResult.deinit`
+#### [done] Step 2.4: Wire `parse_statement` and `ParseResult.deinit`
 
 - Dispatch on `Token.Insert`
 - Free `columns` slice, string literals in `values`, table name as per existing ownership rules
 
 **Dependencies:** Step 2.3
 
-#### Step 2.5: Parser tests
+#### [done] Step 2.5: Parser tests
 
 Add `src/parser/parser.zig` tests (or dedicated test file) with allocator cleanup via `ParseResult.deinit`.
 
 Cases:
 
-- `insert into t values (1, 'a')`
-- `insert into t (b, a) values ('x', 2)`
-- column count ≠ value count → error
-- unknown trailing tokens → error
+- [done] `insert into t values (1, 'a')` — covered by `parse insert without column list`
+- [done] `insert into t (b, a) values ('x', 2)` — `parse insert with column list`
+- [ ] column count ≠ value count → error — **deferred to Phase 3** (binder / `compile_insert`, not parser today)
+- [done] unknown trailing tokens → error — `parse insert rejects extra tokens`
+
+Also covered: null literal, trailing `;`.
 
 **Dependencies:** Step 2.4
 
@@ -585,10 +597,10 @@ Phase 10
 
 ## Done Criteria (end state)
 
-- [ ] `INSERT INTO name VALUES (...)` parses and tokenizes
-- [ ] Optional column list works
+- [x] `INSERT INTO name VALUES (...)` parses and tokenizes
+- [x] Optional column list works
 - [ ] Planner produces `Plan.Insert`; CLI executes it
 - [ ] New row persists in file and is visible via `SELECT`
 - [ ] Rowids monotonic per table
-- [ ] Tests cover tokenizer, parser, binder, and at least one E2E insert
-- [ ] Plan documents known limits (single-leaf / no split) until Phase 8 complete
+- [x] Tests cover tokenizer and parser (binder and E2E insert not yet)
+- [x] Plan documents known limits (single-leaf / no split) until Phase 8 complete
