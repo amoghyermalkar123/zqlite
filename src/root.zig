@@ -6,4 +6,5 @@ test {
     _ = @import("testing/page_builder.zig");
     _ = @import("parser/token.zig");
     _ = @import("parser/parser.zig");
+    _ = @import("bind.zig");
 }

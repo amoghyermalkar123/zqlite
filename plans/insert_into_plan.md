@@ -253,7 +253,7 @@ Also covered: null literal, trailing `;`.
 
 ### Phase 3: Value binding
 
-#### Step 3.1: Add `bind_insert_values` helper
+#### [done] Step 3.1: Add `bind_insert_values` helper
 
 Location: new `src/bind.zig` or method on planner module.
 
