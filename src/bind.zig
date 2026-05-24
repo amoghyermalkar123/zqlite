@@ -74,6 +74,8 @@ pub fn bindInsertValues(
         return out;
     }
 
+    if (values.len != table.cols.len) return error.MismatchedColsAndLiteralLength;
+
     for (values, 0..) |lit, ix| {
         const bound = try bindLiteral(table.cols[ix].col_type, lit);
         out[ix] = try ownField(alloc, bound);
@@ -175,5 +177,13 @@ test "bind insert column not found" {
     try t.expectError(
         error.ColumnNotFound,
         bindInsertValues(t.allocator, table, &[_][]const u8{"missing"}, &[_]ast.Insert.Literal{.{ .Integer = 1 }}),
+    );
+}
+
+test "bind insert without column list rejects wrong value count" {
+    const table = testUsersTable(); // id + name => 2 cols
+    try t.expectError(
+        error.MismatchedColsAndLiteralLength,
+        bindInsertValues(t.allocator, table, null, &.{.{ .Integer = 1 }}),
     );
 }
