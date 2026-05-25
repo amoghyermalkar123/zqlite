@@ -251,7 +251,7 @@ Also covered: null literal, trailing `;`.
 
 ---
 
-### Phase 3: Value binding
+### [done] Phase 3: Value binding
 
 #### [done] Step 3.1: Add `bind_insert_values` helper
 
@@ -282,7 +282,7 @@ Reject: string literal into Integer column (clear `TypeMismatch` error).
 
 **Dependencies:** Phase 2
 
-#### Step 3.2: Column count validation
+#### [done] Step 3.2: Column count validation
 
 - No column list: `values.len == table.cols.len`
 - With column list: `columns.len == values.len` and each name exists in schema
@@ -293,7 +293,7 @@ Reject: string literal into Integer column (clear `TypeMismatch` error).
 
 ### Phase 4: Execution operator and planner
 
-#### Step 4.1: Define `Plan` union in `planner.zig` (or `plan.zig`)
+#### [done] Step 4.1: Define `Plan` union in `planner.zig` (or `plan.zig`)
 
 ```zig
 pub const Plan = union(enum) {
@@ -309,7 +309,7 @@ pub const InsertOp = struct {
 
 **Dependencies:** Phase 3
 
-#### Step 4.2: `compile_insert` in planner
+#### [done] Step 4.2: `compile_insert` in planner
 
 - Resolve table by name from `db.tables_metadata` → `TableNotFound`
 - Call binder → owned `fields` slice
@@ -317,7 +317,7 @@ pub const InsertOp = struct {
 
 **Dependencies:** Step 4.1
 
-#### Step 4.3: Add `execute_insert` module (`src/insert.zig`)
+#### [done] Step 4.3: Add `execute_insert` module (`src/insert.zig`)
 
 Responsibilities (stub first, then fill):
 
@@ -331,7 +331,7 @@ Return: `rows_inserted: usize = 1` or void.
 
 **Dependencies:** Steps 4.1–4.2
 
-#### Step 4.4: Change `Planner.compile` signature
+#### [done] Step 4.4: Change `Planner.compile` signature
 
 `compile(...) !Plan` with switch on `ast.Statement` including `.Insert`.
 

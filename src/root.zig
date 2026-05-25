@@ -7,4 +7,5 @@ test {
     _ = @import("parser/token.zig");
     _ = @import("parser/parser.zig");
     _ = @import("bind.zig");
+    _ = @import("insert.zig");
 }
