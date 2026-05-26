@@ -124,7 +124,7 @@ fn testUsersTable() db.TableMetadata {
     return .{
         .name = "users",
         .cols = test_user_cols[0..],
-        .first_page = 2,
+        .table_root_page = 2,
     };
 }
 

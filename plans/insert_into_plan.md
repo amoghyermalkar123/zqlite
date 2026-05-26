@@ -395,9 +395,9 @@ If `encode_leaf_page` returns `PageTooSmall`, propagate `error.PageFull` (handle
 
 ---
 
-### Phase 6: Pager write path
+### [done] Phase 6: Pager write path
 
-#### Step 6.1: `write_raw_page(page_num, bytes)`
+#### [done] Step 6.1: `write_raw_page(page_num, bytes)`
 
 - Assert `bytes.len == page_size`
 - Copy into `bufs` entry (allocate if missing)
@@ -405,7 +405,7 @@ If `encode_leaf_page` returns `PageTooSmall`, propagate `error.PageFull` (handle
 
 **Dependencies:** None
 
-#### Step 6.2: `flush` to file
+#### [done] Step 6.2: `flush` to file
 
 - For each dirty page in `bufs` (or explicit dirty set): `seekTo((page_num-1)*page_size)`, `writeAll`
 - Page 1: write only from byte 0 of buffer (file image already includes header in buffer from `buildPageFile`)
@@ -414,7 +414,7 @@ If `encode_leaf_page` returns `PageTooSmall`, propagate `error.PageFull` (handle
 
 **Dependencies:** Step 6.1
 
-#### Step 6.3: Wire `execute_insert` to pager
+#### [done] Step 6.3: Wire `execute_insert` to pager
 
 After in-memory page build:
 
@@ -424,12 +424,6 @@ try pager.flush();
 ```
 
 **Dependencies:** Phase 5, Step 6.2
-
-#### Step 6.4: Optional: refresh `tables_metadata`
-
-Not required for INSERT into user tables if schema unchanged. Skip unless you cache row counts.
-
-**Dependencies:** Step 6.3
 
 ---
 

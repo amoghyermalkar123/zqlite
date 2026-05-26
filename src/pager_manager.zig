@@ -16,6 +16,7 @@ f: Io.File,
 page_size: usize,
 bufs: std.AutoHashMap(usize, []u8),
 pages: std.AutoHashMap(usize, CachedPage),
+dirty: std.AutoHashMap(usize, void),
 alloc: Allocator,
 header: Page.DbHeader,
 
@@ -37,8 +38,28 @@ pub fn new(alloc: Allocator, io: Io, f: Io.File) !Self {
         .header = header,
         .bufs = .init(alloc),
         .pages = .init(alloc),
+        .dirty = .init(alloc),
         .alloc = alloc,
     };
+}
+
+fn freeCachedPage(self: *Self, cached: CachedPage) void {
+    switch (cached) {
+        .page => |cached_page| switch (cached_page) {
+            .Interior => |interior| {
+                var pg = interior;
+                self.alloc.free(pg.cell_pointers);
+                pg.cells.deinit(self.alloc);
+            },
+            .Leaf => |leaf| {
+                var pg = leaf;
+                Page.deinitLeafPage(self.alloc, &pg);
+            },
+        },
+        .overflow => |ov| {
+            self.alloc.free(ov.payload);
+        },
+    }
 }
 
 pub fn deinit(self: *Self) void {
@@ -47,24 +68,10 @@ pub fn deinit(self: *Self) void {
     self.bufs.deinit();
 
     var pit = self.pages.iterator();
-    while (pit.next()) |entry| {
-        switch (entry.value_ptr.*) {
-            .page => |*cached_page| switch (cached_page.*) {
-                .Interior => |*pg| {
-                    self.alloc.free(pg.cell_pointers);
-                    pg.cells.deinit(self.alloc);
-                },
-                .Leaf => |*pg| {
-                    Page.deinitLeafPage(self.alloc, pg);
-                },
-            },
-            .overflow => |*ov| {
-                self.alloc.free(ov.payload);
-            },
-        }
-    }
+    while (pit.next()) |entry| self.freeCachedPage(entry.value_ptr.*);
 
     self.pages.deinit();
+    self.dirty.deinit();
 }
 
 pub fn read_page(self: *Self, n: usize) !*const Page.Page {
@@ -128,6 +135,36 @@ fn load_overflow(self: *Self, n: usize) !Page.OverflowPage {
     if (n == 0) return error.InvalidPageNumber;
     const rawbuf = try self.load_raw(n);
     return Page.parse_overflow_page(self.alloc, rawbuf);
+}
+
+pub fn write_raw_page(self: *Self, page_num: usize, bytes: []const u8) !void {
+    if (page_num == 0) return error.InvalidPageNumber;
+    if (bytes.len != self.page_size) return error.InvalidPageSize;
+
+    if (self.bufs.get(page_num)) |dest| {
+        @memcpy(dest, bytes);
+    } else {
+        const new_page = try self.alloc.alloc(u8, self.page_size);
+        errdefer self.alloc.free(new_page);
+        @memcpy(new_page, bytes);
+        try self.bufs.put(page_num, new_page);
+    }
+
+    if (self.pages.fetchRemove(page_num)) |entry| {
+        self.freeCachedPage(entry.value);
+    }
+
+    try self.dirty.put(page_num, {});
+}
+
+pub fn flush(self: *Self) !void {
+    var it = self.dirty.keyIterator();
+    while (it.next()) |page_num| {
+        const buf = self.bufs.get(page_num.*) orelse unreachable;
+        const offset: u64 = @intCast((page_num.* - 1) * self.page_size);
+        try self.f.writePositionalAll(self.io, buf, offset);
+    }
+    self.dirty.clearRetainingCapacity();
 }
 
 const t = std.testing;
@@ -204,4 +241,70 @@ test "load_page from page 2 file image" {
     try t.expectEqual(@as(u16, 1), loaded.Leaf.header.cell_count);
     try t.expectEqual(@as(usize, 1), loaded.Leaf.cells.items.len);
     try t.expectEqual(@as(i64, 7), loaded.Leaf.cells.items[0].row_id);
+}
+
+test "flush persists write_raw_page to disk" {
+    var scratch: [65536]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&scratch);
+    const alloc = fba.allocator();
+
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const db_header = Page.DbHeader{
+        .page_size = 4096,
+        .page_reserved_size = 0,
+    };
+
+    var one_cell = try PageBuilder.init(alloc, .Leaf, db_header);
+    defer one_cell.deinit();
+    try one_cell.addLeafCell(1, &.{.{ .I32 = 10 }});
+    const initial = try one_cell.buildPageFile(1);
+    defer alloc.free(initial);
+
+    var two_cells = try PageBuilder.init(alloc, .Leaf, db_header);
+    defer two_cells.deinit();
+    try two_cells.addLeafCell(1, &.{.{ .I32 = 10 }});
+    try two_cells.addLeafCell(2, &.{.{ .I32 = 20 }});
+    const updated = try two_cells.buildPageFile(1);
+    defer alloc.free(updated);
+
+    // Bootstrap: file must exist so Pager.new can read the DB header.
+    var file = try tmp.dir.createFile(t.io, "flush.db", .{ .read = true });
+    defer file.close(t.io);
+
+    var writer_buf: [256]u8 = undefined;
+    var bootstrap = file.writer(t.io, &writer_buf);
+    try bootstrap.interface.writeAll(initial);
+
+    var pm = try Self.new(alloc, t.io, file);
+    defer pm.deinit();
+
+    try t.expectEqual(@as(usize, 0), pm.dirty.count());
+
+    // First write_raw_page: populate bufs/dirty from in-memory image.
+    try pm.write_raw_page(1, initial);
+    try t.expect(pm.dirty.contains(1));
+    try t.expectEqual(@as(usize, 1), pm.dirty.count());
+
+    try pm.flush();
+    try t.expectEqual(@as(usize, 0), pm.dirty.count());
+
+    const mid = try pm.read_page(1);
+    try t.expectEqual(@as(u16, 1), mid.Leaf.header.cell_count);
+
+    // Second write_raw_page: mutation under test; dirty must clear again after flush.
+    try pm.write_raw_page(1, updated);
+    try t.expect(pm.dirty.contains(1));
+    try t.expectEqual(@as(usize, 1), pm.dirty.count());
+
+    try pm.flush();
+    try t.expectEqual(@as(usize, 0), pm.dirty.count());
+
+    var pm2 = try Self.new(alloc, t.io, file);
+    defer pm2.deinit();
+
+    const after = try pm2.read_page(1);
+    try t.expectEqual(@as(u16, 2), after.Leaf.header.cell_count);
+    try t.expectEqual(@as(usize, 2), after.Leaf.cells.items.len);
 }

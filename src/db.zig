@@ -53,7 +53,7 @@ pub fn scanner(self: *Self, alloc: Allocator, page_num: usize) !Scanner {
 pub const TableMetadata = struct {
     name: []const u8,
     cols: []ast.Create.ColumnDef,
-    first_page: usize,
+    table_root_page: usize,
 
     fn from_cursor(cur: *cursor.Cursor, alloc: Allocator) !?TableMetadata {
         const tv = try cur.field(0) orelse return error.MissingTypeField;
@@ -84,7 +84,7 @@ pub const TableMetadata = struct {
         return TableMetadata{
             .name = name,
             .cols = coldefs,
-            .first_page = @intCast(first_page.Int),
+            .table_root_page = @intCast(first_page.Int),
         };
     }
 };

@@ -94,7 +94,7 @@ pub const Planner = struct {
         return Operator.SeqScan.new(
             self.alloc,
             try cols.toOwnedSlice(self.alloc),
-            try self.db.scanner(self.alloc, table.first_page),
+            try self.db.scanner(self.alloc, table.table_root_page),
         );
     }
 };
@@ -110,7 +110,7 @@ var test_user_cols = [_]ast.Create.ColumnDef{
 var test_users_meta = Db.TableMetadata{
     .name = "users",
     .cols = test_user_cols[0..],
-    .first_page = 2,
+    .table_root_page = 2,
 };
 
 var test_tables = [_]Db.TableMetadata{test_users_meta};

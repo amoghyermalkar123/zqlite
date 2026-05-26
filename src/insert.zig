@@ -25,7 +25,7 @@ pub fn execute_insert(alloc: Allocator, db: *Db, oper: planner.InsertOp) !usize 
 }
 
 fn allocate_rowid(db: *Db, table: *const Db.TableMetadata) !u64 {
-    var scanner = try db.scanner(db.alloc, table.first_page);
+    var scanner = try db.scanner(db.alloc, table.table_root_page);
     defer scanner.page_stack.deinit(db.alloc);
     return try scanner.max_rowid();
 }
@@ -38,13 +38,13 @@ const TargetLeaf = struct {
 /// for now, loads the first page. Also the first page is always a leaf page
 /// until node splitting support is implemented.
 fn load_target_leaf(db: *Db, table: *const Db.TableMetadata) !TargetLeaf {
-    const page = try db.pager.read_page(table.first_page);
+    const page = try db.pager.read_page(table.table_root_page);
 
     switch (page.*) {
         .Interior => return error.UnsupportedInsert,
         .Leaf => |*leaf| {
             if (leaf.header.rightmost_pointer != null) return error.UnsupportedInsert;
-            return .{ .leaf = leaf, .page_num = table.first_page };
+            return .{ .leaf = leaf, .page_num = table.table_root_page };
         },
     }
 }
@@ -102,7 +102,8 @@ fn rebuild_and_write_leaf(alloc: Allocator, db: *Db, table: *const Db.TableMetad
 
     defer alloc.free(new_page_buf);
 
-    // TODO: phase 6
+    try db.pager.write_raw_page(tl.page_num, new_page_buf);
+    try db.pager.flush();
 }
 
 fn rowid_from_cell(cell: []const u8) !u64 {
