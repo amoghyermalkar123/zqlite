@@ -49,6 +49,55 @@ pub fn next_record(self: *Self) !?Cursor {
     }
 }
 
+pub fn max_rowid(self: *Self) !u64 {
+    var max: i64 = 0;
+    var saw_any = false;
+
+    while (true) {
+        const row_id = try self.next_leaf_row_id() orelse {
+            if (self.page_stack.items.len > 1) {
+                _ = self.page_stack.pop();
+                continue;
+            }
+            break;
+        };
+        saw_any = true;
+        max = @max(max, row_id);
+    }
+
+    return if (saw_any) @as(u64, @intCast(max)) + 1 else 1;
+}
+
+fn next_leaf_row_id(self: *Self) !?i64 {
+    while (true) {
+        const pe = try self.current_page();
+
+        if (try pe.next_page()) |num| {
+            try self.page_stack.append(self.alloc, .{
+                .page = num,
+                .cell = 0,
+                .page_manager = self.pager,
+            });
+            continue;
+        }
+
+        const cell = try pe.next_cell() orelse return null;
+
+        switch (cell) {
+            .Interior => |c| {
+                try self.page_stack.append(self.alloc, .{
+                    .page = c.left_child_page,
+                    .cell = 0,
+                    .page_manager = self.pager,
+                });
+            },
+            .Leaf => |c| {
+                return c.row_id;
+            },
+        }
+    }
+}
+
 // ScannedElement returns either a page or a cursor,
 // the items within are owned by the caller
 pub const ScannedElement = union(enum) {

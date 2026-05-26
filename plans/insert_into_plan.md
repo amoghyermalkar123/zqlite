@@ -341,9 +341,9 @@ Keep `compile_select` returning `Plan.Select`.
 
 ---
 
-### Phase 5: Rowid allocation and leaf mutation (in-memory)
+### [done] Phase 5: Rowid allocation and leaf mutation (in-memory)
 
-#### Step 5.1: `max_rowid_for_table`
+#### [done] Step 5.1: `max_rowid_for_table`
 
 Use existing `Scanner` starting at `table.first_page`:
 
@@ -355,7 +355,7 @@ Use existing `Scanner` starting at `table.first_page`:
 
 **Dependencies:** `scanner.zig` (read path)
 
-#### Step 5.2: Collect existing leaf cells as byte slices
+#### [done] Step 5.2: Collect existing leaf cells as byte slices
 
 **Pre-check (before any mutation or re-encode):** Load the table root via `table.first_page` and inspect `PageHeader`:
 
@@ -375,7 +375,7 @@ MVP shortcut: only support tables whose **data** root is a **single leaf page** 
 
 **Dependencies:** `encode_table_leaf_cell`, `encode_leaf_page`
 
-#### Step 5.3: Insert new cell in sorted order
+#### [done] Step 5.3: Insert new cell in sorted order
 
 - Encode new cell with new `rowid`
 - Merge into `[]const []u8` cells sorted by decoded rowid
@@ -387,7 +387,7 @@ Handle page 1 storage offset: use `PageBuilder.buildPageFile(page_num)` pattern 
 
 **Dependencies:** Steps 5.1–5.2
 
-#### Step 5.4: `PageFull` error
+#### [done] Step 5.4: `PageFull` error
 
 If `encode_leaf_page` returns `PageTooSmall`, propagate `error.PageFull` (handled in phase 8).
 
