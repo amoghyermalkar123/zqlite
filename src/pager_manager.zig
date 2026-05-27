@@ -137,6 +137,8 @@ fn load_overflow(self: *Self, n: usize) !Page.OverflowPage {
     return Page.parse_overflow_page(self.alloc, rawbuf);
 }
 
+/// copies the `bytes` into the in-memory buffer and marks the `page_num` as dirty
+/// the caller is responsible to call flush seperately as per requirement
 pub fn write_raw_page(self: *Self, page_num: usize, bytes: []const u8) !void {
     if (page_num == 0) return error.InvalidPageNumber;
     if (bytes.len != self.page_size) return error.InvalidPageSize;
@@ -167,6 +169,7 @@ pub fn flush(self: *Self) !void {
     self.dirty.clearRetainingCapacity();
 }
 
+/// gives the offset for where the next page starts
 pub fn alloc_next_page_number(self: *Self) !usize {
     const file_len = try self.f.length(self.io);
     if (file_len == 0) return error.EmptyDB;
