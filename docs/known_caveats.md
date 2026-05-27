@@ -114,7 +114,7 @@ If INSERT (or overflow allocation) writes bytes past the old end of file but **d
 
 ### Related code touchpoints
 
-- Next page number from file length: `pager_manager` (planned `alloc_next_page_number` for 7.2).
+- Next page number from file length: `pager_manager.alloc_next_page_number`.
 - Overflow bytes on disk: `encode_overflow_page` + `write_raw_page` + `flush`.
 - Leaf overflow pointer: `encode_table_leaf_cell` with `first_ov_page`.
 
@@ -122,4 +122,4 @@ If INSERT (or overflow allocation) writes bytes past the old end of file but **d
 
 ## Related MVP limits (INSERT)
 
-Broader INSERT limitations (single-leaf tables, no splits, etc.) are tracked in `plans/insert_into_plan.md`. Overflow **detection** (7.1) and **allocation** (7.2) progress there; this section records on-disk metadata gaps once overflow writes land.
+Broader INSERT limitations (single-leaf tables, no splits, etc.) are tracked in `plans/insert_into_plan.md` (Phases 8–10). Overflow allocation (Phase 7) is implemented; header page count sync and B-tree splits remain open.

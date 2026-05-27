@@ -13,25 +13,32 @@ Add end-to-end support for `INSERT INTO` so the CLI can insert rows into user ta
 ## Phases
 
 1. [done] Lexer and literal tokens (keywords, numbers, quoted strings, `NULL`)
-2. [done] AST and parser for `INSERT INTO` (parse tests; column-count validation deferred to Phase 3)
-3. Value binding: SQL literals → `RecordFieldEntry` using table metadata
-4. Execution operator and planner wiring
-5. Rowid allocation and leaf-page mutation (in-memory)
-6. Pager write path and cache coherence
-7. Overflow pages for large payloads (if needed beyond MVP)
-8. B-tree growth: page full, splits, new pages (stretch)
-9. CLI integration and integration tests
-10. Cleanup, docs, and optional syntax extensions
+2. [done] AST and parser for `INSERT INTO` (parse tests; column-count validation in Phase 3)
+3. [done] Value binding: SQL literals → `RecordFieldEntry` using table metadata
+4. [done] Execution operator and planner wiring
+5. [done] Rowid allocation and leaf-page mutation (in-memory)
+6. [done] Pager write path and cache coherence
+7. [done] Overflow pages for large payloads
+8. B-tree growth: page full, splits, new pages (stretch — not started)
+9. CLI integration and integration tests (9.1 done; E2E test pending)
+10. Cleanup, docs, and optional syntax extensions (partial — see below)
 
-### Progress snapshot (2026-05-22)
+### Progress snapshot (2026-05-27)
 
 | Phase | Status | Notes |
 |-------|--------|--------|
 | 1 | **Done** | `token.zig`: keywords, integers (+ overflow), strings (no `''` escape), INSERT-shaped tests |
-| 2 | **Done** | `ast/insert.zig`, `parse_insert`, `ParseResult.deinit`; parser tests except column-count (Phase 3) |
-| 3–10 | **Not started** | No `bind.zig`, `insert.zig`, `Plan` union, pager write path, CLI insert path |
+| 2 | **Done** | `ast/insert.zig`, `parse_insert`, `ParseResult.deinit`; parser tests |
+| 3 | **Done** | `bind.zig`: `bindInsertValues`, column count / type checks, unit tests |
+| 4 | **Done** | `Plan` union, `compile_insert`, `execute_insert` stub in `insert.zig` |
+| 5 | **Done** | `max_rowid`, single-leaf pre-check, sorted cell merge, `PageFull` propagation |
+| 6 | **Done** | `write_raw_page`, `flush`, wired in `execute_insert` |
+| 7 | **Done** | Overflow chain via `alloc_next_page_number` + `encode_overflow_page`; test in `insert.zig` |
+| 8 | **Not started** | `load_target_leaf` rejects interior roots and chained leaves; no split / no `encode_interior_page` |
+| 9 | **Partial** | CLI dispatches `Plan.Insert` in `main.zig`; no parse→execute→reopen→SELECT E2E test yet |
+| 10 | **Partial** | `docs/known_caveats.md` covers on-disk limits; error names still module-local; no `docs/insert.md` |
 
-**Next up:** Phase 3 (`bind_insert_values`) → Phase 4 (`Plan` + `compile_insert` stub).
+**Next up:** Phase 9.2 (E2E integration test) → Phase 10.1–10.2 (error/docs polish). Phase 8 when real DBs hit `PageFull` or multi-page roots.
 
 ---
 
@@ -451,25 +458,57 @@ When `encode_table_leaf_cell` would set overflow pointer, payload does not fit l
 
 ### Phase 8: B-tree growth (stretch)
 
+**Current behavior:** `insert.zig` → `load_target_leaf` accepts only a **single leaf root** with no `rightmost_pointer` (no leaf chain). Interior roots and multi-leaf chains return `error.UnsupportedInsert`. `PageFull` from `encode_leaf_page` is returned but not recovered via split.
+
+**Read path already multi-page:** `scanner.zig` descends interior pages and follows leaf `rightmost_pointer` for `max_rowid` / `next_record`. Phase 8 reuses that descent pattern for **write** targeting, then adds encode + parent updates.
+
+#### Step 8.0: Prerequisites (new encode + metadata)
+
+Before splits:
+
+- Add `encode_interior_page` (mirror `parse_table_internal_cell` / `TableInteriorPage` layout in `encode_page.zig`; none exists today).
+- On any file extension (new leaf, overflow already does this): bump database header **page count** — see `docs/known_caveats.md` § overflow / header page count.
+- When root page number changes: update `sqlite_master.rootpage` for that table — see `docs/known_caveats.md` § sqlite_master.
+
+**Dependencies:** Phase 6 (`alloc_next_page_number`, `write_raw_page`, `flush`)
+
 #### Step 8.1: Find correct leaf in multi-page tree
 
-Extend scanner logic: descend interior pages by key (`rowid`) to find leaf where new key belongs.
+Replace `load_target_leaf` with descent by **new rowid** (always `max + 1` today, so rightmost leaf in key order):
 
-**Dependencies:** Phase 5
+1. Start at `table.table_root_page`.
+2. While page is interior: binary-search / scan cells to pick child where `key <= new_rowid < next_key` (same invariant as SQLite table B-trees).
+3. At leaf: if `rightmost_pointer` set, walk the leaf chain until the last page (insert target for append-only rowids).
+
+Extract `TargetLeaf { page_num, leaf }` from the terminal leaf page.
+
+**Tests:** `PageBuilder` interior fixture (see `page_builder.zig` interior test) → descent lands on expected leaf; chained-leaf fixture → last page selected.
+
+**Dependencies:** Phase 5, existing scanner descent logic
 
 #### Step 8.2: Page split
 
-When `PageFull`:
+When `encode_leaf_page` → `PageTooSmall` / `PageFull`:
 
-- Allocate new leaf page
-- Move half the cells (or new cell only) per SQLite split rules
-- Update parent interior or create new root interior page
+1. Allocate new leaf page (`alloc_next_page_number`).
+2. Split cells per SQLite table-leaf rules (move upper half or balance around new key; preserve sorted rowid order on both pages).
+3. Link pages via `rightmost_pointer` on the left leaf if needed.
+4. Insert divider key into parent interior, or **Step 8.2b** create new root if old root was a leaf.
 
-**Dependencies:** Step 8.1, Phase 6 (allocate pages)
+**Step 8.2b: New root (leaf → interior):** When root was a single leaf that split, allocate interior root, point left/right children at the two leaves, write new root page number.
+
+**Tests:** Fill leaf to capacity → insert one more row → two leaves, row visible via scan; interior root fixture → insert → parent cell count increases.
+
+**Dependencies:** Step 8.0, Step 8.1, Phase 6
 
 #### Step 8.3: Update `sqlite_master` root page
 
-Only if root changes (advanced); user tables store `rootpage` in master—INSERT into deep tree may require updating that field. **Defer** until interior inserts are required.
+When Step 8.2b changes the table root page number:
+
+- Rewrite the table’s row in `sqlite_master` (page 1) with the new `rootpage`.
+- Use page-1-safe write path (preserve 100-byte file header) — see `docs/known_caveats.md` § Page 1 write layout.
+
+**Defer** until Step 8.2b is required; overflow-only and in-place leaf updates do **not** touch master.
 
 **Dependencies:** Step 8.2
 
@@ -477,29 +516,34 @@ Only if root changes (advanced); user tables store `rootpage` in master—INSERT
 
 ### Phase 9: CLI and integration tests
 
-#### Step 9.1: Update `main.zig` `eval_query`
+#### [done] Step 9.1: Update `main.zig` `eval_query`
 
-```zig
-const plan = try en.compile(parsed.statement);
-switch (plan) {
-    .Select => |scan| { /* existing row loop */ },
-    .Insert => |ins| {
-        try insert.execute(&dba, ins);
-        // print "INSERT OK" or rows affected
-    },
-}
-```
+`eval_query` compiles via `Planner.compile`, switches on `Plan`, and calls `insert.execute_insert` for `.Insert`, printing `INSERT OK (N row[s])`.
 
 **Dependencies:** Phase 4, 6
 
-#### Step 9.2: Integration test binary or test block
+#### Step 9.2: Integration test (E2E)
 
-Workflow:
+Add one test block (e.g. in `insert.zig` or `planner.zig`) that exercises the full stack without the CLI:
 
-1. Copy or build minimal `.db` with `CREATE TABLE` + optional seed row via `sqlite3`
-2. Open with `db.from_file`
-3. `parse_statement` + `compile` + `execute_insert`
-4. Reopen file, `SELECT` via existing scan path, assert new row
+```
+PageBuilder → tmp .db file → db.from_file
+  → parse_statement("INSERT INTO …")
+  → Planner.compile → execute_insert → flush
+reopen same file → SeqScan / scanner → assert row + rowid
+```
+
+Suggested cases:
+
+| Case | Assert |
+|------|--------|
+| Empty single-leaf table | 1 row, rowid 1 |
+| Table with rows 1, 5 | new rowid 6, both old rows still present |
+| Large text (overflow) | cell has `first_overflow`, tail bytes roundtrip |
+| Wrong value count | compile/bind error before write |
+| Unknown table | `error.TableNotFound` at compile |
+
+Prefer `PageBuilder` + `tmpDir` (same style as `insert.zig` overflow test and `pager_manager` flush test) over external `sqlite3` fixtures so CI stays self-contained.
 
 **Dependencies:** Step 9.1
 
@@ -507,9 +551,10 @@ Workflow:
 
 - [ ] `INSERT INTO t VALUES (...)` on empty table
 - [ ] Insert second row, rowid increments
-- [ ] Wrong column count → error message
+- [ ] Wrong column count → error message (`MismatchedColsAndLiteralLength`)
 - [ ] Unknown table → `TableNotFound`
 - [ ] `.tables` unchanged; new row visible via `SELECT`
+- [ ] Large row triggers overflow; file grows; zsqlite `SELECT` still works (note: `sqlite3` may warn until header page count is synced — see known caveats)
 
 **Dependencies:** Step 9.2
 
@@ -519,23 +564,43 @@ Workflow:
 
 #### Step 10.1: Error set consolidation
 
-Shared errors: `TableNotFound`, `InvalidColumnName`, `TypeMismatch`, `PageFull`, `UnsupportedInsert`.
+Errors are split across modules today:
+
+| Module | Errors (actual names) |
+|--------|----------------------|
+| `bind.zig` | `ColTypeLiteralValMismatch`, `ColumnNotFound`, `MismatchedColsAndLiteralLength`, `UnsupportedColType` |
+| `insert.zig` | `UnsupportedInsert`, `PageFull`, `EmptyDB`, `OverflowChunkTooLarge` |
+| `planner.zig` | `TableNotFound`, `InvalidColumnName` (SELECT), `UnsupportedStatement` |
+
+**Polish options** (pick one; avoid drive-by renames):
+
+1. **Thin shared module** (`errors.zig`): re-export canonical names; alias old names during migration.
+2. **Document mapping only** in `docs/insert.md`: plan names → actual names (minimal churn).
+
+Target user-facing set: table/column not found, type mismatch, column count mismatch, page full, unsupported insert (multi-page / interior).
 
 **Dependencies:** All prior phases
 
 #### Step 10.2: Document limitations
 
-Short section in `README` or `docs/insert.md`: supported syntax, single-leaf MVP, no `INSERT SELECT`.
+**Done (partial):** `docs/known_caveats.md` — page 1 writes, overflow EOF append, header page count, sqlite_master, single-leaf limit cross-ref.
 
-**Dependencies:** MVP complete
+**Remaining:** `docs/insert.md` (or README section) with:
+
+- Supported syntax (`INSERT INTO t VALUES (…)`, optional column list, literal kinds)
+- Explicit MVP limits (single-leaf root, no splits, no `INSERT SELECT`, no conflict clauses)
+- Link to `known_caveats.md` for on-disk compatibility notes
+
+**Dependencies:** MVP complete (Phases 1–7 + 9.2)
 
 #### Step 10.3: Optional extensions (pick individually)
 
 - Multi-row `VALUES (...), (...)`
-- `REAL` literals and column type
+- `REAL` literals and column type (`UnsupportedColType` today)
 - Blob literal `X'ABCD'`
 - Affinity-based coercion (SQLite rules)
-- `INSERT OR IGNORE` stub that maps to errors today
+- `INSERT OR IGNORE` / conflict clauses
+- Header page count sync on overflow extend (quick win for `sqlite3` interoperability)
 
 **Dependencies:** MVP complete
 
@@ -593,8 +658,11 @@ Phase 10
 
 - [x] `INSERT INTO name VALUES (...)` parses and tokenizes
 - [x] Optional column list works
-- [ ] Planner produces `Plan.Insert`; CLI executes it
-- [ ] New row persists in file and is visible via `SELECT`
-- [ ] Rowids monotonic per table
-- [x] Tests cover tokenizer and parser (binder and E2E insert not yet)
-- [x] Plan documents known limits (single-leaf / no split) until Phase 8 complete
+- [x] Planner produces `Plan.Insert`; CLI executes it
+- [x] New row persists in file (unit tests: overflow insert; pager flush test)
+- [ ] Full E2E: parse → compile → insert → reopen → SELECT (Phase 9.2)
+- [x] Rowids monotonic per table (`max_rowid` test)
+- [x] Tests cover tokenizer, parser, binder, planner compile, insert execution (overflow)
+- [ ] E2E insert test; CLI manual checklist (Phase 9.3)
+- [x] Plan + `known_caveats.md` document limits (single-leaf / no split until Phase 8)
+- [ ] Phase 10: consolidated errors + `docs/insert.md` syntax reference
