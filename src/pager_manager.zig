@@ -167,6 +167,15 @@ pub fn flush(self: *Self) !void {
     self.dirty.clearRetainingCapacity();
 }
 
+pub fn alloc_next_page_number(self: *Self) !usize {
+    const file_len = try self.f.length(self.io);
+    if (file_len == 0) return error.EmptyDB;
+    // TODO: system should have asserts in a way that this NEVER happens
+    // so technically this should be battle tested with `unreachable` keyword
+    if (file_len % self.page_size != 0) @panic("Misaligned Database");
+    return file_len / self.page_size + 1;
+}
+
 const t = std.testing;
 const PageBuilder = @import("testing/page_builder.zig").PageBuilder;
 
@@ -307,4 +316,35 @@ test "flush persists write_raw_page to disk" {
     const after = try pm2.read_page(1);
     try t.expectEqual(@as(u16, 2), after.Leaf.header.cell_count);
     try t.expectEqual(@as(usize, 2), after.Leaf.cells.items.len);
+}
+
+test "alloc_next_page_number appends after last page" {
+    var scratch: [49152]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&scratch);
+    const alloc = fba.allocator();
+
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const db_header = Page.DbHeader{
+        .page_size = 4096,
+        .page_reserved_size = 0,
+    };
+
+    var builder = try PageBuilder.init(alloc, .Leaf, db_header);
+    defer builder.deinit();
+    const file_image = try builder.buildPageFile(2);
+    defer alloc.free(file_image);
+
+    var file = try tmp.dir.createFile(t.io, "pages.db", .{ .read = true });
+    defer file.close(t.io);
+
+    var writer_buf: [256]u8 = undefined;
+    var file_writer = file.writer(t.io, &writer_buf);
+    try file_writer.interface.writeAll(file_image);
+
+    var pm = try Self.new(alloc, t.io, file);
+    defer pm.deinit();
+
+    try t.expectEqual(@as(usize, 3), try pm.alloc_next_page_number());
 }

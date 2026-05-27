@@ -427,15 +427,15 @@ try pager.flush();
 
 ---
 
-### Phase 7: Overflow pages
+### [done] Phase 7: Overflow pages
 
-#### Step 7.1: Detect overflow need
+#### [done] Step 7.1: Detect overflow need
 
 When `encode_table_leaf_cell` would set overflow pointer, payload does not fit local slot.
 
 **Dependencies:** `encode_table_leaf_cell` (already supports `first_ov_page`)
 
-#### Step 7.2: Allocate overflow chain (MVP)
+#### [done] Step 7.2: Allocate overflow chain (MVP)
 
 - Append new page(s) at end of file (read `db.header` page size, file length / page_size + 1)
 - Write overflow pages with `encode` layout matching `parse_overflow_page`

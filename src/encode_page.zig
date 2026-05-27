@@ -45,7 +45,10 @@ pub fn payloadSizeFor(entry: RecordFieldEntry) usize {
     return size;
 }
 
-// cotrm
+/// encodes an entire record for a leaf cell given the provided `fields`
+/// this involves encoding the overflow bytes as well. It is the caller's responsibility
+/// to properly slice the overflow bytes and store them in the overflow pages
+/// caller owns the returned memory
 pub fn encode_record(alloc: Allocator, fields: []const RecordFieldEntry) ![]u8 {
     var sum_of_serial_types_for_all_fields: usize = 0;
     var sum_of_payload: usize = 0;
@@ -127,6 +130,34 @@ pub fn encode_record(alloc: Allocator, fields: []const RecordFieldEntry) ![]u8 {
     }
     // return the buffer as owned by the callee
     return record_buffer.toOwnedSlice(alloc);
+}
+
+/// just a helper to reduce boilerplate to get local and overflow size
+pub fn table_leaf_payload_layout(db_header: page.DbHeader, payload_len: usize) !struct { local: usize, overflow_bytes: ?usize } {
+    const hd = page.PageHeader{
+        .page_type = .Leaf,
+        .first_free_block = 0,
+        .cell_count = 0,
+        .cell_content_offset = 0,
+        .fragmented_byts_count = 0,
+    };
+    const pair = try hd.local_and_overflow_size(db_header, payload_len);
+    return .{ .local = pair[0], .overflow_bytes = pair[1] };
+}
+
+pub fn encode_overflow_page(alloc: Allocator, db_header: page.DbHeader, next_page: ?u32, chunk: []const u8) ![]u8 {
+    const page_size: usize = @intCast(db_header.page_size);
+    const max_chunk = db_header.usable_page_size() - 4;
+    if (chunk.len > max_chunk) return error.OverflowChunkTooLarge;
+
+    const buf = try alloc.alloc(u8, page_size);
+    errdefer alloc.free(buf);
+    @memset(buf, 0);
+
+    const next_raw: u32 = next_page orelse 0;
+    std.mem.writeInt(u32, buf[0..4], next_raw, .big);
+    @memcpy(buf[4 .. 4 + chunk.len], chunk);
+    return buf;
 }
 
 /// [payload_size varint][rowid varint][local payload bytes][overflow ptr?]
@@ -352,6 +383,53 @@ test "encode table leaf cell errors when overflow pointer is missing" {
     try t.expectError(
         error.MissingOverflowPagePointer,
         encode_table_leaf_cell(t.allocator, db_header, 1, payload, null),
+    );
+}
+
+test "encode overflow page roundtrip" {
+    const db_header = page.DbHeader{
+        .page_size = 512,
+        .page_reserved_size = 0,
+    };
+
+    const chunk = "overflow-chunk-data";
+    const raw = try encode_overflow_page(t.allocator, db_header, 42, chunk);
+    defer t.allocator.free(raw);
+
+    const parsed = try page.parse_overflow_page(t.allocator, raw);
+    defer t.allocator.free(parsed.payload);
+
+    try t.expectEqual(@as(?usize, 42), parsed.next);
+    try t.expectEqualSlices(u8, chunk, parsed.payload[0..chunk.len]);
+}
+
+test "encode overflow page last page has zero next pointer" {
+    const db_header = page.DbHeader{
+        .page_size = 512,
+        .page_reserved_size = 0,
+    };
+
+    const raw = try encode_overflow_page(t.allocator, db_header, null, "tail");
+    defer t.allocator.free(raw);
+
+    const parsed = try page.parse_overflow_page(t.allocator, raw);
+    defer t.allocator.free(parsed.payload);
+
+    try t.expect(parsed.next == null);
+}
+
+test "encode overflow page rejects oversized chunk" {
+    const db_header = page.DbHeader{
+        .page_size = 512,
+        .page_reserved_size = 0,
+    };
+
+    const oversized = try t.allocator.alloc(u8, db_header.usable_page_size() - 3);
+    defer t.allocator.free(oversized);
+
+    try t.expectError(
+        error.OverflowChunkTooLarge,
+        encode_overflow_page(t.allocator, db_header, null, oversized),
     );
 }
 

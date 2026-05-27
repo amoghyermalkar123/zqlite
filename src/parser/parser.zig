@@ -284,17 +284,14 @@ pub const ParseResult = struct {
     alloc: Allocator,
 
     pub fn deinit(self: *ParseResult) void {
-        // Free identifier strings inside tokens
+        deinitStatement(self.alloc, self.statement);
         for (self.tokens) |tok| {
             switch (tok) {
                 .Identifier, .StringLiteral => |s| self.alloc.free(s),
                 else => {},
             }
         }
-        // Free the token slice itself
         self.alloc.free(self.tokens);
-        // Free the result_columns ArrayList
-        deinitStatement(self.alloc, self.statement);
     }
 };
 
@@ -303,7 +300,7 @@ fn deinitStatement(alloc: Allocator, statement: ast.Statement) void {
     switch (stmt) {
         .Select => |*sel| sel.core.result_columns.deinit(alloc),
         .CreateTable => |crt| {
-            for (crt.cols) |c| alloc.free(c.name);
+            // Column names borrow identifier storage freed with `tokens` in ParseResult.deinit.
             alloc.free(crt.cols);
         },
         .Insert => |ins| {

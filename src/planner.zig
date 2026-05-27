@@ -113,13 +113,14 @@ var test_users_meta = Db.TableMetadata{
     .table_root_page = 2,
 };
 
-var test_tables = [_]Db.TableMetadata{test_users_meta};
+var test_tables_buffer: [1]Db.TableMetadata = undefined;
 
 fn testDb() Db {
+    test_tables_buffer[0] = test_users_meta;
     return .{
         .header = .{ .page_size = 4096, .page_reserved_size = 0 },
         .pager = undefined,
-        .tables_metadata = test_tables[0..],
+        .tables_metadata = test_tables_buffer[0..],
         .alloc = t.allocator,
     };
 }
@@ -136,7 +137,7 @@ test "compile insert without column list" {
 
     try t.expect(plan == .Insert);
     const op = plan.Insert;
-    try t.expect(op.table == &test_users_meta);
+    try t.expect(op.table == &fake_db.tables_metadata[0]);
     try t.expectEqual(ep.RecordFieldEntry{ .I8 = 3 }, op.fields[0]);
     try t.expect(op.fields[1] == .String);
     try t.expectEqualStrings("bob", op.fields[1].String);

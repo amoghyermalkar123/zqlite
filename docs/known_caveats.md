@@ -72,6 +72,54 @@ Do not pass raw `encode_leaf_page` output to `write_raw_page(1, …)` alone.
 
 ---
 
+## Overflow pages: EOF append without catalog updates (INSERT)
+
+### Summary
+
+When a row needs overflow storage, the MVP plan is to **append new pages at the end of the file** and chain them from the leaf cell. That path does **not**:
+
+- take pages from the SQLite **freelist** (reclaimed deleted pages), or
+- update the **database header page count** after growing the file.
+
+`sqlite_master` is also **unchanged** for overflow-only inserts (table `rootpage` stays the same).
+
+### Freelist allocation
+
+SQLite records unused pages in a freelist so new allocations can reuse space instead of growing the file forever.
+
+| Approach | MVP overflow path | Full SQLite behavior |
+|----------|-------------------|----------------------|
+| New pages | `file_size / page_size + 1`, consecutive page numbers | Prefer freelist; extend file only if empty |
+| After many deletes | Dead pages may remain unused in file | Freelist hands them back out |
+
+**When you need freelist:** Deletes, `VACUUM`-style reuse, long-lived databases where file size must not monotonically grow.
+
+**MVP OK without it:** Append-only tests and inserts; zsqlite does not delete rows or shrink files yet.
+
+### Database header page count
+
+The 100-byte file header includes how many pages the database is supposed to have. Readers and `sqlite3` use that for bounds and integrity checks.
+
+If INSERT (or overflow allocation) writes bytes past the old end of file but **does not** bump the header’s page count, the on-disk file can be **longer than the header claims**.
+
+**When you need to update it:** Any time you extend the file (overflow pages, new btree pages, splits). Required for strict compatibility with the `sqlite3` CLI and tools that trust the header over raw file length.
+
+**MVP risk:** zsqlite’s own pager often uses file size for the next page number; external tools opening the same file may warn or misbehave until the header is synced.
+
+### `sqlite_master` (root page)
+
+`sqlite_master` stores each table’s **`rootpage`** (B-tree root). Normal `INSERT` into an existing user table does **not** change it—the leaf (or interior) root is already correct.
+
+**When you need to update `sqlite_master`:** B-tree **splits** or a **new root** (e.g. interior page added, root page number changes). Phase 8-style growth, not overflow-only append to an unchanged leaf root.
+
+### Related code touchpoints
+
+- Next page number from file length: `pager_manager` (planned `alloc_next_page_number` for 7.2).
+- Overflow bytes on disk: `encode_overflow_page` + `write_raw_page` + `flush`.
+- Leaf overflow pointer: `encode_table_leaf_cell` with `first_ov_page`.
+
+---
+
 ## Related MVP limits (INSERT)
 
-Broader INSERT limitations (single-leaf tables, no splits, no overflow allocation, etc.) are tracked in `plans/insert_into_plan.md`. This file focuses on on-disk and write-path caveats that are easy to miss when reading the insert code.
+Broader INSERT limitations (single-leaf tables, no splits, etc.) are tracked in `plans/insert_into_plan.md`. Overflow **detection** (7.1) and **allocation** (7.2) progress there; this section records on-disk metadata gaps once overflow writes land.
