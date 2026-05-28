@@ -29,7 +29,7 @@ pub fn execute_insert(alloc: Allocator, db: *Db, oper: planner.InsertOp) !usize 
     const leaf = try ep.encode_table_leaf_cell(alloc, db.header, rowid, record, first_ov);
     defer alloc.free(leaf);
 
-    try rebuild_and_write_leaf(alloc, db, oper.table, leaf);
+    try rebuild_and_write_leaf(alloc, db, oper.table, rowid, leaf);
 
     return 1;
 }
@@ -53,6 +53,7 @@ fn write_overflow_chain(alloc: Allocator, pager: *pgm, db_header: pg.DbHeader, t
         offset += writable_chunk_len;
     }
 
+    try pager.bump_database_page_count(page_count);
     return @intCast(next_page_number);
 }
 
@@ -67,18 +68,31 @@ const TargetLeaf = struct {
     leaf: *const pg.TableLeafPage,
 };
 
-/// for now, loads the first page. Also the first page is always a leaf page
-/// until node splitting support is implemented.
-fn load_target_leaf(db: *Db, table: *const Db.TableMetadata) !TargetLeaf {
-    const page = try db.pager.read_page(table.table_root_page);
+/// returns the leaf where the data for the row can be found
+/// loops interior pages until the target leaf is found
+fn load_target_leaf(db: *Db, table: *const Db.TableMetadata, rowid: u64) !TargetLeaf {
+    var page_num = table.table_root_page;
 
-    switch (page.*) {
-        .Interior => return error.UnsupportedInsert,
-        .Leaf => |*leaf| {
-            if (leaf.header.rightmost_pointer != null) return error.UnsupportedInsert;
-            return .{ .leaf = leaf, .page_num = table.table_root_page };
-        },
+    while (true) {
+        const page = try db.pager.read_page(page_num);
+        switch (page.*) {
+            .Interior => |*interior| {
+                page_num = try child_page_for_rowid(interior, rowid);
+            },
+            .Leaf => |*leaf| return .{ .leaf = leaf, .page_num = page_num },
+        }
     }
+}
+
+fn child_page_for_rowid(interior: *const pg.TableInteriorPage, rowid: u64) !usize {
+    for (interior.cells.items) |cell| {
+        if (rowid <= @as(u64, @intCast(cell.key))) {
+            return cell.left_child_page;
+        }
+    }
+
+    const rm = interior.header.rightmost_pointer orelse unreachable;
+    return rm;
 }
 
 fn collect_existing_cells(alloc: Allocator, db: *Db, target: TargetLeaf) ![][]const u8 {
@@ -99,8 +113,8 @@ fn collect_existing_cells(alloc: Allocator, db: *Db, target: TargetLeaf) ![][]co
     return cells.toOwnedSlice(alloc);
 }
 
-fn rebuild_and_write_leaf(alloc: Allocator, db: *Db, table: *const Db.TableMetadata, new_cell: []const u8) !void {
-    const tl = try load_target_leaf(db, table);
+fn rebuild_and_write_leaf(alloc: Allocator, db: *Db, table: *const Db.TableMetadata, rowid: u64, new_cell: []const u8) !void {
+    const tl = try load_target_leaf(db, table, rowid);
     const exi = try collect_existing_cells(alloc, db, tl);
 
     var all = try std.ArrayList([]const u8).initCapacity(alloc, exi.len + 1);
@@ -145,10 +159,162 @@ fn rowid_from_cell(cell: []const u8) !u64 {
     return rid.value;
 }
 
+pub fn update_table_rootpage_in_master(db: *Db, table_name: []const u8, new_root: usize) !void {
+    _ = db;
+    _ = table_name;
+    _ = new_root;
+    return error.NotImplemented;
+}
+
 const t = std.testing;
 const pgm = @import("pager_manager.zig");
 const Scanner = @import("scanner.zig");
 const PageBuilder = @import("testing/page_builder.zig").PageBuilder;
+
+fn write_interior_tree_fixture(alloc: Allocator, pm: *pgm, db_header: pg.DbHeader) !void {
+    var leaf3 = try PageBuilder.init(alloc, .Leaf, db_header);
+    defer leaf3.deinit();
+    try leaf3.addLeafCell(1, &.{.{ .I32 = 10 }});
+    try leaf3.addLeafCell(5, &.{.{ .I32 = 50 }});
+    const page3 = try leaf3.build();
+    defer alloc.free(page3);
+    try pm.write_raw_page(3, page3);
+
+    var leaf4 = try PageBuilder.init(alloc, .Leaf, db_header);
+    defer leaf4.deinit();
+    try leaf4.addLeafCell(10, &.{.{ .I32 = 100 }});
+    try leaf4.addLeafCell(20, &.{.{ .I32 = 200 }});
+    const page4 = try leaf4.build();
+    defer alloc.free(page4);
+    try pm.write_raw_page(4, page4);
+
+    const interior_cell = try ep.encode_table_interior_cell(alloc, 3, 5);
+    defer alloc.free(interior_cell);
+    const page2 = try ep.encode_interior_page(alloc, db_header, &.{interior_cell}, 4);
+    defer alloc.free(page2);
+    try pm.write_raw_page(2, page2);
+}
+
+test "child_page_for_rowid picks subtree by rowid" {
+    const db_header = pg.DbHeader{
+        .page_size = 512,
+        .page_reserved_size = 0,
+    };
+
+    const interior_cell = try ep.encode_table_interior_cell(t.allocator, 3, 5);
+    defer t.allocator.free(interior_cell);
+
+    const page_buf = try ep.encode_interior_page(t.allocator, db_header, &.{interior_cell}, 4);
+    defer t.allocator.free(page_buf);
+
+    var parsed = try pg.parse_page(t.allocator, page_buf, 2, &db_header);
+    defer pg.deinitPage(t.allocator, &parsed);
+
+    const interior = &parsed.Interior;
+    try t.expectEqual(@as(usize, 3), try child_page_for_rowid(interior, 1));
+    try t.expectEqual(@as(usize, 3), try child_page_for_rowid(interior, 5));
+    try t.expectEqual(@as(usize, 4), try child_page_for_rowid(interior, 6));
+    try t.expectEqual(@as(usize, 4), try child_page_for_rowid(interior, 21));
+}
+
+test "load_target_leaf descends interior root to correct leaf" {
+    var scratch: [65536]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&scratch);
+    const alloc = fba.allocator();
+
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const db_header = pg.DbHeader{
+        .page_size = 4096,
+        .page_reserved_size = 0,
+    };
+
+    var builder = try PageBuilder.init(alloc, .Leaf, db_header);
+    defer builder.deinit();
+    const file_image = try builder.buildPageFile(4);
+    defer alloc.free(file_image);
+
+    var file = try tmp.dir.createFile(t.io, "interior-root.db", .{ .read = true });
+    defer file.close(t.io);
+
+    var writer_buf: [256]u8 = undefined;
+    var file_writer = file.writer(t.io, &writer_buf);
+    try file_writer.interface.writeAll(file_image);
+
+    var pm = try pgm.new(alloc, t.io, file);
+    defer pm.deinit();
+
+    try write_interior_tree_fixture(alloc, &pm, db_header);
+
+    const table_meta = Db.TableMetadata{
+        .name = "t",
+        .cols = &.{},
+        .table_root_page = 2,
+    };
+    var tables = [_]Db.TableMetadata{table_meta};
+    var db = Db{
+        .header = db_header,
+        .pager = pm,
+        .tables_metadata = tables[0..],
+        .alloc = alloc,
+    };
+
+    const left = try load_target_leaf(&db, &tables[0], 3);
+    try t.expectEqual(@as(usize, 3), left.page_num);
+    try t.expectEqual(@as(i64, 5), left.leaf.cells.items[left.leaf.cells.items.len - 1].row_id);
+
+    const right = try load_target_leaf(&db, &tables[0], 21);
+    try t.expectEqual(@as(usize, 4), right.page_num);
+    try t.expectEqual(@as(i64, 20), right.leaf.cells.items[right.leaf.cells.items.len - 1].row_id);
+}
+
+test "load_target_leaf returns single-leaf root unchanged" {
+    var scratch: [49152]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&scratch);
+    const alloc = fba.allocator();
+
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const db_header = pg.DbHeader{
+        .page_size = 4096,
+        .page_reserved_size = 0,
+    };
+
+    var builder = try PageBuilder.init(alloc, .Leaf, db_header);
+    defer builder.deinit();
+    try builder.addLeafCell(1, &.{.{ .I32 = 10 }});
+    const file_image = try builder.buildPageFile(2);
+    defer alloc.free(file_image);
+
+    var file = try tmp.dir.createFile(t.io, "single-leaf.db", .{ .read = true });
+    defer file.close(t.io);
+
+    var writer_buf: [256]u8 = undefined;
+    var file_writer = file.writer(t.io, &writer_buf);
+    try file_writer.interface.writeAll(file_image);
+
+    var pm = try pgm.new(alloc, t.io, file);
+    defer pm.deinit();
+
+    const table_meta = Db.TableMetadata{
+        .name = "t",
+        .cols = &.{},
+        .table_root_page = 2,
+    };
+    var tables = [_]Db.TableMetadata{table_meta};
+    var db = Db{
+        .header = db_header,
+        .pager = pm,
+        .tables_metadata = tables[0..],
+        .alloc = alloc,
+    };
+
+    const tl = try load_target_leaf(&db, &tables[0], 2);
+    try t.expectEqual(@as(usize, 2), tl.page_num);
+    try t.expectEqual(@as(usize, 1), tl.leaf.cells.items.len);
+}
 
 test "max_rowid increments" {
     var scratch: [49152]u8 = undefined;

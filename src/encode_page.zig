@@ -243,6 +243,44 @@ pub fn encode_leaf_page(alloc: Allocator, db_header: page.DbHeader, cells: []con
     return buf;
 }
 
+pub fn encode_interior_page(alloc: Allocator, db_header: page.DbHeader, cells: []const []const u8, rightmost_pointer: u32) ![]u8 {
+    const page_size: usize = db_header.page_size;
+    const header_size = cnst.PAGE_INTERIOR_HEADER_SIZE;
+    const pointer_bytes = cells.len * 2;
+
+    var total_cell_bytes: usize = 0;
+    for (cells) |cell| total_cell_bytes += cell.len;
+
+    if (header_size + pointer_bytes + total_cell_bytes > page_size) {
+        return error.PageTooSmall;
+    }
+
+    const buf = try alloc.alloc(u8, page_size);
+    errdefer alloc.free(buf);
+    @memset(buf, 0);
+
+    buf[0] = @intFromEnum(page.PageType.Interior);
+    std.mem.writeInt(u16, buf[cnst.PAGE_FIRST_FREEBLOCK_OFFSET..][0..2], 0, .big);
+    std.mem.writeInt(u16, buf[cnst.PAGE_CELL_COUNT_OFFSET..][0..2], @intCast(cells.len), .big);
+    buf[cnst.PAGE_FRAGMENTED_BYTES_COUNT_OFFSET] = 0;
+    std.mem.writeInt(u32, buf[cnst.RIGHTMOST_POINTER_OFFSET..][0..4], rightmost_pointer, .big);
+
+    // write backwards because after cell pointers we store free space
+    var content_cursor: usize = page_size;
+    for (cells, 0..) |cell, i| {
+        content_cursor -= cell.len;
+        @memcpy(buf[content_cursor .. content_cursor + cell.len], cell);
+
+        const ptr_offset = header_size + i * 2;
+        std.mem.writeInt(u16, buf[ptr_offset..][0..2], @intCast(content_cursor), .big);
+    }
+
+    const content_offset: u16 = if (content_cursor == cnst.PAGE_MAX_SIZE) 0 else @intCast(content_cursor);
+    std.mem.writeInt(u16, buf[cnst.PAGE_CELL_CONTENT_OFFSET..][0..2], content_offset, .big);
+
+    return buf;
+}
+
 const std = @import("std");
 const cnst = @import("constants.zig");
 const varint = @import("varint.zig");
@@ -515,6 +553,58 @@ test "encode leaf page with multiple cells" {
     try t.expect(ptr1 > ptr2);
     try t.expectEqualSlices(u8, cell1, page_buf[ptr1 .. ptr1 + cell1.len]);
     try t.expectEqualSlices(u8, cell2, page_buf[ptr2 .. ptr2 + cell2.len]);
+}
+
+test "encode interior page roundtrip parse" {
+    const db_header = page.DbHeader{
+        .page_size = 512,
+        .page_reserved_size = 0,
+    };
+
+    const cell0 = try encode_table_interior_cell(t.allocator, 2, 100);
+    defer t.allocator.free(cell0);
+    const cell1 = try encode_table_interior_cell(t.allocator, 5, 300);
+    defer t.allocator.free(cell1);
+
+    const page_buf = try encode_interior_page(t.allocator, db_header, &.{ cell0, cell1 }, 0x00010203);
+    defer t.allocator.free(page_buf);
+
+    var parsed = try page.parse_page(t.allocator, page_buf, 2, &db_header);
+    defer page.deinitPage(t.allocator, &parsed);
+
+    try t.expectEqual(page.PageType.Interior, parsed.Interior.header.page_type);
+    try t.expectEqual(@as(?u32, 0x00010203), parsed.Interior.header.rightmost_pointer);
+    try t.expectEqual(@as(usize, 2), parsed.Interior.cells.items.len);
+    try t.expectEqual(@as(u32, 2), parsed.Interior.cells.items[0].left_child_page);
+    try t.expectEqual(@as(i64, 100), parsed.Interior.cells.items[0].key);
+    try t.expectEqual(@as(u32, 5), parsed.Interior.cells.items[1].left_child_page);
+    try t.expectEqual(@as(i64, 300), parsed.Interior.cells.items[1].key);
+}
+
+test "encode interior page matches PageBuilder" {
+    const db_header = page.DbHeader{
+        .page_size = 512,
+        .page_reserved_size = 0,
+    };
+
+    var builder = try PageBuilder.init(t.allocator, .Interior, db_header);
+    defer builder.deinit();
+    builder.setRightmostPointer(0x00010203);
+    try builder.addInteriorCell(2, 100);
+    try builder.addInteriorCell(5, 300);
+
+    const expected = try builder.build();
+    defer t.allocator.free(expected);
+
+    const cell0 = try encode_table_interior_cell(t.allocator, 2, 100);
+    defer t.allocator.free(cell0);
+    const cell1 = try encode_table_interior_cell(t.allocator, 5, 300);
+    defer t.allocator.free(cell1);
+
+    const page_buf = try encode_interior_page(t.allocator, db_header, &.{ cell0, cell1 }, 0x00010203);
+    defer t.allocator.free(page_buf);
+
+    try t.expectEqualSlices(u8, expected, page_buf);
 }
 
 test "encode leaf page roundtrip parse" {

@@ -462,7 +462,7 @@ When `encode_table_leaf_cell` would set overflow pointer, payload does not fit l
 
 **Read path already multi-page:** `scanner.zig` descends interior pages and follows leaf `rightmost_pointer` for `max_rowid` / `next_record`. Phase 8 reuses that descent pattern for **write** targeting, then adds encode + parent updates.
 
-#### Step 8.0: Prerequisites (new encode + metadata)
+#### [done] Step 8.0: Prerequisites (new encode + metadata)
 
 Before splits:
 

@@ -179,6 +179,14 @@ pub fn alloc_next_page_number(self: *Self) !usize {
     return file_len / self.page_size + 1;
 }
 
+pub fn bump_database_page_count(self: *Self, added_pages: usize) !void {
+    const page1 = try self.load_raw(1);
+    const cur = std.mem.readInt(u32, page1[cnst.HEADER_DATABASE_SIZE_OFFSET..][0..4], .big);
+    const next = cur + @as(u32, @intCast(added_pages));
+    std.mem.writeInt(u32, page1[cnst.HEADER_DATABASE_SIZE_OFFSET..][0..4], next, .big);
+    try self.dirty.put(1, {});
+}
+
 const t = std.testing;
 const PageBuilder = @import("testing/page_builder.zig").PageBuilder;
 
@@ -350,4 +358,52 @@ test "alloc_next_page_number appends after last page" {
     defer pm.deinit();
 
     try t.expectEqual(@as(usize, 3), try pm.alloc_next_page_number());
+}
+
+test "bump_database_page_count updates file header" {
+    var scratch: [49152]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&scratch);
+    const alloc = fba.allocator();
+
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const db_header = Page.DbHeader{
+        .page_size = 4096,
+        .page_reserved_size = 0,
+    };
+
+    var builder = try PageBuilder.init(alloc, .Leaf, db_header);
+    defer builder.deinit();
+    var file_image = try builder.buildPageFile(2);
+    defer alloc.free(file_image);
+    std.mem.writeInt(u32, file_image[cnst.HEADER_DATABASE_SIZE_OFFSET..][0..4], 2, .big);
+
+    var file = try tmp.dir.createFile(t.io, "pages.db", .{ .read = true });
+    defer file.close(t.io);
+
+    var writer_buf: [256]u8 = undefined;
+    var file_writer = file.writer(t.io, &writer_buf);
+    try file_writer.interface.writeAll(file_image);
+
+    var pm = try Self.new(alloc, t.io, file);
+    defer pm.deinit();
+
+    const blank = try alloc.alloc(u8, db_header.page_size);
+    defer alloc.free(blank);
+    @memset(blank, 0);
+
+    try pm.write_raw_page(3, blank);
+    try pm.bump_database_page_count(1);
+    try pm.flush();
+
+    var header: [cnst.HEADER_SIZE]u8 = undefined;
+    var reader_buf: [256]u8 = undefined;
+    var file_reader = file.reader(t.io, &reader_buf);
+    try file_reader.interface.readSliceAll(&header);
+
+    try t.expectEqual(
+        @as(u32, 3),
+        std.mem.readInt(u32, header[cnst.HEADER_DATABASE_SIZE_OFFSET..][0..4], .big),
+    );
 }
