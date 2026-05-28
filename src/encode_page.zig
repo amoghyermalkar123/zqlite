@@ -206,6 +206,8 @@ pub fn encode_table_interior_cell(alloc: Allocator, left_child_page: u32, key: u
     return interior_cell.toOwnedSlice(alloc);
 }
 
+/// caller must free cells
+/// encode_leaf_page consumes cells
 pub fn encode_leaf_page(alloc: Allocator, db_header: page.DbHeader, cells: []const []const u8) ![]u8 {
     const page_size: usize = db_header.page_size;
     const header_size = cnst.PAGE_LEAF_HEADER_SIZE;

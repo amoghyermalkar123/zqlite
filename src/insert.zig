@@ -142,7 +142,10 @@ fn rebuild_and_write_leaf(alloc: Allocator, db: *Db, table: *const Db.TableMetad
     }.lessThan);
 
     const new_page_buf = ep.encode_leaf_page(alloc, db.header, all.items) catch |e| switch (e) {
-        error.PageTooSmall => return error.PageFull,
+        error.PageTooSmall => {
+            try split_and_insert_leaf(alloc, db, table, rowid, all.items);
+            return;
+        },
         else => |x| return x,
     };
 
@@ -152,6 +155,133 @@ fn rebuild_and_write_leaf(alloc: Allocator, db: *Db, table: *const Db.TableMetad
     try db.pager.flush();
 }
 
+const InsertContext = struct {
+    target_leaf_page: usize,
+    target_interior_page_parent: ?usize, // null => target was root (leaf or interior)
+};
+
+/// loads the context required for conducting a potential split insert
+/// traverses the tree until it finds the matched leaf page
+/// keeps track of the traversal stack. When it finds the matched leaf page based on the
+/// provided `rowid`, returns it as part of the insert context along with it's immediate
+/// Interior page parent
+fn load_insert_context(db: *Db, table: *const Db.TableMetadata, rowid: u64) !InsertContext {
+    var page_num = table.table_root_page;
+    var parent: ?usize = null;
+
+    while (true) {
+        const page = try db.pager.read_page(page_num);
+        switch (page.*) {
+            .Interior => |*interior| {
+                parent = page_num;
+                page_num = try child_page_for_rowid(interior, rowid);
+            },
+            .Leaf => return .{
+                .target_leaf_page = page_num,
+                .target_interior_page_parent = parent,
+            },
+        }
+    }
+}
+
+fn set_table_root_page(db: *Db, table: *const Db.TableMetadata, new_root: usize) void {
+    for (db.tables_metadata) |*tm| {
+        if (tm.name.ptr == table.name.ptr) {
+            tm.table_root_page = new_root;
+            return;
+        }
+    }
+}
+
+fn split_and_insert_leaf(alloc: Allocator, db: *Db, table: *const Db.TableMetadata, rowid: u64, cells: []const []const u8) !void {
+    const ctx = try load_insert_context(db, table, rowid);
+    const split = try split_cells(alloc, db.header, cells);
+
+    const left_buf = try ep.encode_leaf_page(alloc, db.header, split.left);
+    defer alloc.free(left_buf);
+
+    const new_right_page_num = try db.pager.alloc_next_page_number();
+
+    const right_buf = try ep.encode_leaf_page(alloc, db.header, split.right);
+    defer alloc.free(right_buf);
+
+    try db.pager.write_raw_page(ctx.target_leaf_page, left_buf);
+    try db.pager.write_raw_page(new_right_page_num, right_buf);
+
+    const new_left_child_page = try ep.encode_table_interior_cell(alloc, @intCast(ctx.target_leaf_page), split.divider_key);
+    errdefer alloc.free(new_left_child_page);
+
+    if (ctx.target_interior_page_parent) |pi| {
+        const par = try db.pager.read_page(pi);
+        // allocate new interior cells
+        var new_interior_cells = try std.ArrayList([]const u8).initCapacity(alloc, par.Interior.cells.items.len + 1);
+        errdefer {
+            for (new_interior_cells.items) |ce| alloc.free(ce);
+            new_interior_cells.deinit(alloc);
+        }
+        // encode each cell
+        for (par.Interior.cells.items) |cell| {
+            const enc = try ep.encode_table_interior_cell(alloc, cell.left_child_page, @intCast(cell.key));
+            try new_interior_cells.append(alloc, enc);
+        }
+        // now add the new cell which points to the split page
+        try new_interior_cells.append(alloc, new_left_child_page);
+        // encode a new interior page with new interior cells
+        const parent_buf = ep.encode_interior_page(alloc, db.header, new_interior_cells.items, @intCast(new_right_page_num)) catch |e| switch (e) {
+            error.PageTooSmall => return error.PageFull,
+            else => |x| return x,
+        };
+        defer alloc.free(parent_buf);
+
+        defer {
+            for (new_interior_cells.items) |ce| alloc.free(ce);
+            new_interior_cells.deinit(alloc);
+        }
+        // write to file
+        try db.pager.write_raw_page(pi, parent_buf);
+        try db.pager.bump_database_page_count(1);
+    } else {
+        defer alloc.free(new_left_child_page);
+
+        const new_root = new_right_page_num + 1;
+        const new_root_page = ep.encode_interior_page(alloc, db.header, &.{new_left_child_page}, @intCast(new_right_page_num)) catch |e| switch (e) {
+            error.PageTooSmall => return error.PageFull,
+            else => |x| return x,
+        };
+        defer alloc.free(new_root_page);
+
+        try db.pager.write_raw_page(new_root, new_root_page);
+        set_table_root_page(db, table, new_root);
+        try db.pager.bump_database_page_count(2);
+    }
+
+    try db.pager.flush();
+}
+
+fn split_cells(
+    alloc: Allocator,
+    db_header: pg.DbHeader,
+    cells: []const []const u8,
+) !struct { left: []const []const u8, right: []const []const u8, divider_key: u64 } {
+    if (cells.len < 2) return error.PageFull;
+
+    for (1..cells.len) |split_index| {
+        const left = cells[0..split_index];
+        const right = cells[split_index..];
+
+        const left_buf = ep.encode_leaf_page(alloc, db_header, left) catch continue;
+        defer alloc.free(left_buf);
+        const right_buf = ep.encode_leaf_page(alloc, db_header, right) catch continue;
+        defer alloc.free(right_buf);
+
+        const divkey = try rowid_from_cell(left[left.len - 1]);
+        return .{ .divider_key = divkey, .left = left, .right = right };
+    }
+
+    return error.PageFull;
+}
+
+// TODO: this should be part of varint
 fn rowid_from_cell(cell: []const u8) !u64 {
     const varint = @import("varint.zig");
     const ps = try varint.decode(cell, 0);
@@ -438,4 +568,194 @@ test "insert large text writes overflow chain" {
     const last_page = first_overflow + overflow_page_count - 1;
     const last_ov = try pm2.read_overflow(last_page);
     try t.expect(last_ov.next == null);
+}
+
+test "insert splits full leaf root into interior btree" {
+    var scratch: [262144]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&scratch);
+    const alloc = fba.allocator();
+
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const db_header = pg.DbHeader{
+        .page_size = 512,
+        .page_reserved_size = 0,
+    };
+
+    var builder = try PageBuilder.init(alloc, .Leaf, db_header);
+    defer builder.deinit();
+
+    var packed_rowid: u64 = 1;
+    while (true) {
+        try builder.addLeafCell(packed_rowid, &.{.{ .I32 = @intCast(packed_rowid) }});
+        const trial = builder.build() catch {
+            builder.deinit();
+            builder = try PageBuilder.init(alloc, .Leaf, db_header);
+            const full_count = packed_rowid - 1;
+            for (1..full_count + 1) |rid| {
+                try builder.addLeafCell(rid, &.{.{ .I32 = @intCast(rid) }});
+            }
+            break;
+        };
+        alloc.free(trial);
+        packed_rowid += 1;
+    }
+    try t.expect(packed_rowid > 1);
+
+    const file_image = try builder.buildPageFile(2);
+    defer alloc.free(file_image);
+
+    var file = try tmp.dir.createFile(t.io, "split-leaf.db", .{ .read = true });
+    defer file.close(t.io);
+
+    var writer_buf: [256]u8 = undefined;
+    var file_writer = file.writer(t.io, &writer_buf);
+    try file_writer.interface.writeAll(file_image);
+
+    var pm = try pgm.new(alloc, t.io, file);
+    defer pm.deinit();
+
+    var tables = [_]Db.TableMetadata{.{
+        .name = "t",
+        .cols = &.{},
+        .table_root_page = 2,
+    }};
+    var db = Db{
+        .header = db_header,
+        .pager = pm,
+        .tables_metadata = tables[0..],
+        .alloc = alloc,
+    };
+
+    const insert_rowid = packed_rowid;
+    var fields = [_]ep.RecordFieldEntry{.{ .I32 = @intCast(insert_rowid) }};
+    const op = planner.InsertOp{
+        .table = &tables[0],
+        .fields = fields[0..],
+    };
+
+    try t.expectEqual(@as(usize, 1), try execute_insert(alloc, &db, op));
+
+    const root_page = try pm.read_page(tables[0].table_root_page);
+    try t.expect(root_page.* == .Interior);
+    try t.expectEqual(@as(usize, 1), root_page.Interior.cells.items.len);
+
+    const left_page = try pm.read_page(root_page.Interior.cells.items[0].left_child_page);
+    try t.expect(left_page.* == .Leaf);
+
+    const right_page_num = root_page.Interior.header.rightmost_pointer orelse return error.TestExpectedRightmost;
+    const right_page = try pm.read_page(right_page_num);
+    try t.expect(right_page.* == .Leaf);
+
+    const total_cells = left_page.Leaf.cells.items.len + right_page.Leaf.cells.items.len;
+    try t.expectEqual(@as(usize, @intCast(insert_rowid)), total_cells);
+
+    var scanner = try Scanner.new(&pm, alloc, tables[0].table_root_page);
+    defer scanner.page_stack.deinit(alloc);
+    try t.expectEqual(@as(u64, insert_rowid + 1), try scanner.max_rowid());
+}
+
+test "insert splits rightmost leaf under interior root" {
+    var scratch: [65536]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&scratch);
+    const alloc = fba.allocator();
+
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const db_header = pg.DbHeader{
+        .page_size = 512,
+        .page_reserved_size = 0,
+    };
+
+    var builder = try PageBuilder.init(alloc, .Leaf, db_header);
+    defer builder.deinit();
+    const file_image = try builder.buildPageFile(4);
+    defer alloc.free(file_image);
+
+    var file = try tmp.dir.createFile(t.io, "split-interior.db", .{ .read = true });
+    defer file.close(t.io);
+
+    var writer_buf: [256]u8 = undefined;
+    var file_writer = file.writer(t.io, &writer_buf);
+    try file_writer.interface.writeAll(file_image);
+
+    var pm = try pgm.new(alloc, t.io, file);
+    defer pm.deinit();
+
+    var leaf4 = try PageBuilder.init(alloc, .Leaf, db_header);
+    defer leaf4.deinit();
+
+    var packed_rowid: u64 = 10;
+    while (true) {
+        try leaf4.addLeafCell(packed_rowid, &.{.{ .I32 = @intCast(packed_rowid) }});
+        const trial = leaf4.build() catch {
+            leaf4.deinit();
+            leaf4 = try PageBuilder.init(alloc, .Leaf, db_header);
+            const full_count = packed_rowid - 1;
+            for (10..full_count + 1) |rid| {
+                try leaf4.addLeafCell(rid, &.{.{ .I32 = @intCast(rid) }});
+            }
+            break;
+        };
+        alloc.free(trial);
+        packed_rowid += 1;
+    }
+    try t.expect(packed_rowid > 11);
+
+    const page4 = try leaf4.build();
+    defer alloc.free(page4);
+    try pm.write_raw_page(4, page4);
+
+    var leaf3 = try PageBuilder.init(alloc, .Leaf, db_header);
+    defer leaf3.deinit();
+    try leaf3.addLeafCell(1, &.{.{ .I32 = 1 }});
+    try leaf3.addLeafCell(5, &.{.{ .I32 = 5 }});
+    const page3 = try leaf3.build();
+    defer alloc.free(page3);
+    try pm.write_raw_page(3, page3);
+
+    const interior_cell = try ep.encode_table_interior_cell(alloc, 3, 5);
+    defer alloc.free(interior_cell);
+    const page2 = try ep.encode_interior_page(alloc, db_header, &.{interior_cell}, 4);
+    defer alloc.free(page2);
+    try pm.write_raw_page(2, page2);
+
+    var tables = [_]Db.TableMetadata{.{
+        .name = "t",
+        .cols = &.{},
+        .table_root_page = 2,
+    }};
+    var db = Db{
+        .header = db_header,
+        .pager = pm,
+        .tables_metadata = tables[0..],
+        .alloc = alloc,
+    };
+
+    const insert_rowid = packed_rowid;
+    var fields = [_]ep.RecordFieldEntry{.{ .I32 = @intCast(insert_rowid) }};
+    const op = planner.InsertOp{
+        .table = &tables[0],
+        .fields = fields[0..],
+    };
+
+    try t.expectEqual(@as(usize, 1), try execute_insert(alloc, &db, op));
+
+    const interior = try pm.read_page(2);
+    try t.expectEqual(@as(usize, 2), interior.Interior.cells.items.len);
+    try t.expect(interior.Interior.header.rightmost_pointer != 4);
+
+    var scanner = try Scanner.new(&pm, alloc, 2);
+    defer scanner.page_stack.deinit(alloc);
+
+    var count: usize = 0;
+    var rec = try scanner.next_record();
+    while (rec != null) : (rec = try scanner.next_record()) {
+        defer rec.?.deinit();
+        count += 1;
+    }
+    // left leaf (2 rows) + packed right rows + inserted row
+    try t.expectEqual(@as(usize, 2 + (packed_rowid - 10) + 1), count);
 }

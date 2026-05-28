@@ -472,7 +472,7 @@ Before splits:
 
 **Dependencies:** Phase 6 (`alloc_next_page_number`, `write_raw_page`, `flush`)
 
-#### Step 8.1: Find correct leaf in multi-page tree
+#### [done] Step 8.1: Find correct leaf in multi-page tree
 
 Replace `load_target_leaf` with descent by **new rowid** (always `max + 1` today, so rightmost leaf in key order):
 
