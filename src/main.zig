@@ -54,7 +54,9 @@ fn cli(io: Io, alloc: Allocator, dba: *db) !void {
         } else if (std.mem.eql(u8, input, ".tables")) {
             try display_tables(dba);
         } else {
-            try eval_query(dba, input, alloc);
+            eval_query(dba, input, alloc) catch |err| {
+                std.debug.print("error: {s}\n", .{@errorName(err)});
+            };
             try stdout.flush();
         }
     }
@@ -62,7 +64,7 @@ fn cli(io: Io, alloc: Allocator, dba: *db) !void {
 
 fn display_tables(dba: *db) !void {
     for (dba.tables_metadata) |tb| {
-        std.debug.print("field: {s}\n", .{tb.name});
+        std.debug.print("table: {s}\n", .{tb.name});
     }
 }
 
@@ -73,7 +75,7 @@ fn eval_query(dba: *db, query: []const u8, alloc: Allocator) !void {
 
     var en = engine.Planner.new(dba, alloc);
     var oper = try en.compile(parsed_query.statement);
-    defer oper.deinit();
+    defer oper.deinit(alloc);
 
     switch (oper) {
         .Select => |*scan| {

@@ -125,7 +125,7 @@ fn load_page(self: *Self, n: usize) !Page.Page {
     const rawbuf = try self.load_raw(n);
     return Page.parse_page(
         self.alloc,
-        rawbuf[0..self.header.usable_page_size()],
+        rawbuf[0..self.page_size],
         n,
         &self.header,
     );

@@ -479,15 +479,13 @@ fn bootstrapFileWithMasterAndTablePage(
     alloc: Allocator,
     db_header: pg.DbHeader,
     table_name: []const u8,
+    create_sql: []const u8,
     table_page: []const u8,
 ) ![]u8 {
     var master = try PageBuilder.init(alloc, .Leaf, db_header);
     defer master.deinit();
 
-    const sql = try std.fmt.allocPrint(alloc, "CREATE TABLE {s} (id INTEGER)", .{table_name});
-    defer alloc.free(sql);
-
-    const fields = masterRowFields(table_name, 2, sql);
+    const fields = masterRowFields(table_name, 2, create_sql);
     try master.addLeafCell(1, &fields);
 
     const page1 = try master.buildPageFile(1);
@@ -496,7 +494,7 @@ fn bootstrapFileWithMasterAndTablePage(
     const page_size = db_header.page_size;
     const out = try alloc.alloc(u8, page_size * 2);
     @memcpy(out[0..page_size], page1);
-    @memcpy(out[page_size..page_size + table_page.len], table_page);
+    @memcpy(out[page_size .. page_size + table_page.len], table_page);
     std.mem.writeInt(u32, out[cnst.HEADER_DATABASE_SIZE_OFFSET..][0..4], 2, .big);
     return out;
 }
@@ -823,7 +821,8 @@ test "insert splits full leaf root into interior btree" {
     const table_page = try builder.build();
     defer alloc.free(table_page);
 
-    const file_image = try bootstrapFileWithMasterAndTablePage(alloc, db_header, "t", table_page);
+    const create_sql = "CREATE TABLE t (id INTEGER)";
+    const file_image = try bootstrapFileWithMasterAndTablePage(alloc, db_header, "t", create_sql, table_page);
     defer alloc.free(file_image);
 
     var file = try tmp.dir.createFile(t.io, "split-leaf.db", .{ .read = true });
@@ -1012,7 +1011,8 @@ test "update_table_rootpage_in_master rewrites rootpage on page 1" {
     const table_page = try table.build();
     defer alloc.free(table_page);
 
-    const file_image = try bootstrapFileWithMasterAndTablePage(alloc, db_header, "t", table_page);
+    const create_sql = "CREATE TABLE t (id INTEGER)";
+    const file_image = try bootstrapFileWithMasterAndTablePage(alloc, db_header, "t", create_sql, table_page);
     defer alloc.free(file_image);
 
     var file = try tmp.dir.createFile(t.io, "master-update.db", .{ .read = true });
@@ -1075,7 +1075,8 @@ test "update_table_rootpage_in_master returns TableNotFound for unknown table" {
     const table_page = try table.build();
     defer alloc.free(table_page);
 
-    const file_image = try bootstrapFileWithMasterAndTablePage(alloc, db_header, "t", table_page);
+    const create_sql = "CREATE TABLE t (id INTEGER)";
+    const file_image = try bootstrapFileWithMasterAndTablePage(alloc, db_header, "t", create_sql, table_page);
     defer alloc.free(file_image);
 
     var file = try tmp.dir.createFile(t.io, "master-missing.db", .{ .read = true });

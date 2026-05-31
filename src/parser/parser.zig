@@ -108,11 +108,12 @@ const ParserState = struct {
         _ = try self.expectNextTokenEq(Token.Lpar);
 
         var column_defs = try std.ArrayList(ast.Create.ColumnDef).initCapacity(alloc, 1);
+        errdefer column_defs.deinit(alloc);
 
         const first_def = try self.parse_column_def();
         try column_defs.append(alloc, first_def);
 
-        while (self.nextTokenIs(Token.Semicolon)) {
+        while (self.nextTokenIs(Token.Comma)) {
             self.advance();
             try column_defs.append(alloc, try self.parse_column_def());
         }
@@ -347,6 +348,15 @@ pub fn parse_statement(input: []const u8, alloc: Allocator, trailing_semicolon: 
 /// cotrm
 pub fn parse_create_statement(input: []const u8, alloc: Allocator) !ParseResult {
     const tokens = try token.tokenize(alloc, input);
+    errdefer {
+        for (tokens) |tk| {
+            switch (tk) {
+                .Identifier, .StringLiteral => |s| alloc.free(s),
+                else => {},
+            }
+        }
+        alloc.free(tokens);
+    }
     var parser = ParserState.init(tokens);
     const statement = try parser.parse_create_table(alloc);
 
@@ -403,4 +413,17 @@ test "parse insert with trailing semicolon" {
 
 test "parse insert rejects extra tokens" {
     try t.expectError(error.UnexpectedToken, parse_statement("insert into t values (1) from x", t.allocator, false));
+}
+
+test "parse create table with multiple columns" {
+    var parsed = try parse_create_statement("CREATE TABLE users (id INTEGER, name TEXT)", t.allocator);
+    defer parsed.deinit();
+
+    const crt = parsed.statement.CreateTable;
+    try t.expectEqualStrings("users", crt.name);
+    try t.expectEqual(@as(usize, 2), crt.cols.len);
+    try t.expectEqualStrings("id", crt.cols[0].name);
+    try t.expect(crt.cols[0].col_type == .Integer);
+    try t.expectEqualStrings("name", crt.cols[1].name);
+    try t.expect(crt.cols[1].col_type == .Text);
 }

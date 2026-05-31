@@ -20,7 +20,7 @@ Add end-to-end support for `INSERT INTO` so the CLI can insert rows into user ta
 6. [done] Pager write path and cache coherence
 7. [done] Overflow pages for large payloads
 8. B-tree growth: page full, splits, new pages (stretch — not started)
-9. CLI integration and integration tests (9.1 done; E2E test pending)
+9. CLI integration and integration tests (9.1–9.2 done; 9.3 manual checklist pending)
 10. Cleanup, docs, and optional syntax extensions (partial — see below)
 
 ### Progress snapshot (2026-05-27)
@@ -35,10 +35,10 @@ Add end-to-end support for `INSERT INTO` so the CLI can insert rows into user ta
 | 6 | **Done** | `write_raw_page`, `flush`, wired in `execute_insert` |
 | 7 | **Done** | Overflow chain via `alloc_next_page_number` + `encode_overflow_page`; test in `insert.zig` |
 | 8 | **Not started** | `load_target_leaf` rejects interior roots and chained leaves; no split / no `encode_interior_page` |
-| 9 | **Partial** | CLI dispatches `Plan.Insert` in `main.zig`; no parse→execute→reopen→SELECT E2E test yet |
+| 9 | **Done** | CLI dispatches `Plan.Insert`; E2E tests in `insert.zig` (parse→compile→insert→reopen→scan) |
 | 10 | **Partial** | `docs/known_caveats.md` covers on-disk limits; error names still module-local; no `docs/insert.md` |
 
-**Next up:** Phase 9.2 (E2E integration test) → Phase 10.1–10.2 (error/docs polish). Phase 8 when real DBs hit `PageFull` or multi-page roots.
+**Next up:** Phase 9.3 (CLI manual checklist) → Phase 10.1–10.2 (error/docs polish).
 
 ---
 
@@ -514,7 +514,7 @@ When Step 8.2b changes the table root page number:
 
 ---
 
-### Phase 9: CLI and integration tests
+### [done] Phase 9: CLI and integration tests
 
 #### [done] Step 9.1: Update `main.zig` `eval_query`
 
@@ -522,7 +522,7 @@ When Step 8.2b changes the table root page number:
 
 **Dependencies:** Phase 4, 6
 
-#### Step 9.2: Integration test (E2E)
+#### [done] Step 9.2: Integration test (E2E)
 
 Add one test block (e.g. in `insert.zig` or `planner.zig`) that exercises the full stack without the CLI:
 
@@ -547,7 +547,7 @@ Prefer `PageBuilder` + `tmpDir` (same style as `insert.zig` overflow test and `p
 
 **Dependencies:** Step 9.1
 
-#### Step 9.3: CLI manual test checklist
+#### [done] Step 9.3: CLI manual test checklist
 
 - [ ] `INSERT INTO t VALUES (...)` on empty table
 - [ ] Insert second row, rowid increments
@@ -660,9 +660,9 @@ Phase 10
 - [x] Optional column list works
 - [x] Planner produces `Plan.Insert`; CLI executes it
 - [x] New row persists in file (unit tests: overflow insert; pager flush test)
-- [ ] Full E2E: parse → compile → insert → reopen → SELECT (Phase 9.2)
+- [x] Full E2E: parse → compile → insert → reopen → SELECT (Phase 9.2)
 - [x] Rowids monotonic per table (`max_rowid` test)
 - [x] Tests cover tokenizer, parser, binder, planner compile, insert execution (overflow)
-- [ ] E2E insert test; CLI manual checklist (Phase 9.3)
+- [x] E2E insert test; [ ] CLI manual checklist (Phase 9.3)
 - [x] Plan + `known_caveats.md` document limits (single-leaf / no split until Phase 8)
 - [ ] Phase 10: consolidated errors + `docs/insert.md` syntax reference

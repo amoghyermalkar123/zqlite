@@ -636,7 +636,7 @@ test "encode leaf page roundtrip parse" {
 
 const tw = @import("tripwire").module(enum {
     after_record_buffer_alloc,
-}, @TypeOf(encode_record));
+}, error{OutOfMemory});
 
 fn encode_record_tripwire_impl(alloc: Allocator) !void {
     errdefer tw.reset();
