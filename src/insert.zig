@@ -118,7 +118,7 @@ fn rebuild_and_write_leaf(alloc: Allocator, db: *Db, table: *const Db.TableMetad
     const exi = try collect_existing_cells(alloc, db, tl);
 
     var all = try std.ArrayList([]const u8).initCapacity(alloc, exi.len + 1);
-    errdefer {
+    defer {
         for (all.items) |c| alloc.free(c);
         all.deinit(alloc);
     }
@@ -127,11 +127,6 @@ fn rebuild_and_write_leaf(alloc: Allocator, db: *Db, table: *const Db.TableMetad
 
     for (exi) |e| try all.append(alloc, e);
     try all.append(alloc, try alloc.dupe(u8, new_cell));
-
-    defer {
-        for (all.items) |c| alloc.free(c);
-        all.deinit(alloc);
-    }
 
     std.sort.pdq([]const u8, all.items, {}, struct {
         pub fn lessThan(_: void, a: []const u8, b: []const u8) bool {
@@ -241,8 +236,8 @@ fn split_and_insert_leaf(alloc: Allocator, db: *Db, table: *const Db.TableMetada
         try db.pager.write_raw_page(pi, parent_buf);
         try db.pager.bump_database_page_count(1);
     } else {
+        // root is leaf
         defer alloc.free(new_left_child_page);
-
         const new_root = new_right_page_num + 1;
         const new_root_page = ep.encode_interior_page(alloc, db.header, &.{new_left_child_page}, @intCast(new_right_page_num)) catch |e| switch (e) {
             error.PageTooSmall => return error.PageFull,
@@ -253,6 +248,7 @@ fn split_and_insert_leaf(alloc: Allocator, db: *Db, table: *const Db.TableMetada
         try db.pager.write_raw_page(new_root, new_root_page);
         set_table_root_page(db, table, new_root);
         try db.pager.bump_database_page_count(2);
+        try update_table_rootpage_in_master(db, table.name, new_root);
     }
 
     try db.pager.flush();
@@ -289,17 +285,238 @@ fn rowid_from_cell(cell: []const u8) !u64 {
     return rid.value;
 }
 
-pub fn update_table_rootpage_in_master(db: *Db, table_name: []const u8, new_root: usize) !void {
-    _ = db;
-    _ = table_name;
-    _ = new_root;
-    return error.NotImplemented;
+pub fn update_table_rootpage_in_master(
+    db: *Db,
+    table_name: []const u8,
+    new_root: usize,
+) !void {
+    const alloc = db.alloc;
+    const master = try db.pager.read_page(1);
+    const leaf = &master.Leaf;
+
+    var cells = try std.ArrayList([]const u8).initCapacity(alloc, leaf.cells.items.len);
+    errdefer {
+        for (cells.items) |c| alloc.free(c);
+        cells.deinit(alloc);
+    }
+
+    var found = false;
+    for (leaf.cells.items) |cell| {
+        const header = try pg.parse_record_header(alloc, cell.payload);
+
+        var payload = try std.ArrayList(u8).initCapacity(alloc, cell.payload.len);
+        try payload.appendSlice(alloc, cell.payload);
+
+        var cur = cursor_mod.Cursor{
+            .record_header = header,
+            .cell_payload = payload,
+            .pager = &db.pager,
+            .next_overflow_page = cell.first_overflow,
+            .alloc = alloc,
+        };
+        defer cur.deinit();
+
+        const name = try master_row_name(&cur);
+        const enc = if (name != null and std.mem.eql(u8, name.?, table_name)) blk: {
+            found = true;
+            break :blk try reencode_master_row(alloc, db, cell, new_root);
+        } else try copy_master_cell(alloc, db, cell);
+
+        try cells.append(alloc, enc);
+    }
+
+    if (!found) return error.TableNotFound; // or a dedicated MasterRowNotFound
+
+    defer {
+        for (cells.items) |c| alloc.free(c);
+        cells.deinit(alloc);
+    }
+
+    const file_image = try build_page1_file_image(alloc, db, cells.items);
+    defer alloc.free(file_image);
+
+    try db.pager.write_raw_page(1, file_image);
+}
+
+/// B-tree on page 1 lives at offset 100; cell pointers are absolute in the full page slot.
+fn encode_page1_master_leaf(alloc: Allocator, db_header: pg.DbHeader, cells: []const []const u8) ![]u8 {
+    const page_size = db_header.page_size;
+    const page_offset = cnst.HEADER_SIZE;
+    const header_size = cnst.PAGE_LEAF_HEADER_SIZE;
+    const pointer_bytes = cells.len * 2;
+
+    var total_cell_bytes: usize = 0;
+    for (cells) |cell| total_cell_bytes += cell.len;
+
+    if (page_offset + header_size + pointer_bytes + total_cell_bytes > page_size) {
+        return error.PageTooSmall;
+    }
+
+    const buf = try alloc.alloc(u8, page_size);
+    errdefer alloc.free(buf);
+    @memset(buf, 0);
+
+    buf[page_offset] = @intFromEnum(pg.PageType.Leaf);
+    std.mem.writeInt(u16, buf[page_offset + cnst.PAGE_FIRST_FREEBLOCK_OFFSET ..][0..2], 0, .big);
+    std.mem.writeInt(u16, buf[page_offset + cnst.PAGE_CELL_COUNT_OFFSET ..][0..2], @intCast(cells.len), .big);
+    buf[page_offset + cnst.PAGE_FRAGMENTED_BYTES_COUNT_OFFSET] = 0;
+
+    var content_cursor: usize = page_size;
+    for (cells, 0..) |cell, i| {
+        content_cursor -= cell.len;
+        @memcpy(buf[content_cursor .. content_cursor + cell.len], cell);
+
+        const ptr_offset = page_offset + header_size + i * 2;
+        std.mem.writeInt(u16, buf[ptr_offset..][0..2], @intCast(content_cursor), .big);
+    }
+
+    const content_offset: u16 = if (content_cursor == cnst.PAGE_MAX_SIZE) 0 else @intCast(content_cursor);
+    std.mem.writeInt(u16, buf[page_offset + cnst.PAGE_CELL_CONTENT_OFFSET ..][0..2], content_offset, .big);
+
+    return buf;
+}
+
+fn build_page1_file_image(
+    alloc: Allocator,
+    db: *Db,
+    cells: []const []const u8,
+) ![]u8 {
+    _ = try db.pager.read_page(1);
+    const existing = db.pager.bufs.get(1) orelse return error.EmptyDB;
+
+    const out = try encode_page1_master_leaf(alloc, db.header, cells);
+    @memcpy(out[0..cnst.HEADER_SIZE], existing[0..cnst.HEADER_SIZE]);
+    return out;
+}
+
+const cnst = @import("constants.zig");
+const cursor = @import("cursor.zig");
+
+const cursor_mod = @import("cursor.zig");
+
+fn master_row_name(cur: *cursor_mod.Cursor) !?[]const u8 {
+    const ty = try cur.field(0) orelse return null;
+    if (ty != .String or !std.mem.eql(u8, ty.String.str, "table")) return null;
+
+    const name = try cur.field(1) orelse return null;
+    return switch (name) {
+        .String => |s| s.str,
+        else => null,
+    };
+}
+
+fn value_to_entry(v: cursor.Value) ep.RecordFieldEntry {
+    return switch (v) {
+        .Null => .Null,
+        .Int => |n| .{ .I64 = n }, // fine for master rows
+        .Float => |f| .{ .Float = f },
+        .String => |s| .{ .String = s.str },
+        .Blob => |b| .{ .Blob = b.str },
+    };
+}
+
+fn reencode_master_row(
+    alloc: Allocator,
+    db: *Db,
+    cell: pg.TableLeafCell,
+    new_root: usize,
+) ![]u8 {
+    const header = try pg.parse_record_header(alloc, cell.payload);
+
+    var payload = try std.ArrayList(u8).initCapacity(alloc, cell.payload.len);
+    try payload.appendSlice(alloc, cell.payload);
+
+    var cur = cursor.Cursor{
+        .record_header = header,
+        .cell_payload = payload,
+        .pager = &db.pager,
+        .next_overflow_page = cell.first_overflow,
+        .alloc = alloc,
+    };
+    defer cur.deinit();
+
+    var fields: [5]ep.RecordFieldEntry = undefined;
+    for (0..5) |i| {
+        const v = (try cur.field(i)) orelse return error.MissingMasterField;
+        fields[i] = value_to_entry(v);
+    }
+    fields[3] = .{ .I32 = @intCast(new_root) };
+
+    const record = try ep.encode_record(alloc, &fields);
+    defer alloc.free(record);
+
+    const ov: ?u32 = if (cell.first_overflow) |p| @intCast(p) else null;
+    return try ep.encode_table_leaf_cell(alloc, db.header, @intCast(cell.row_id), record, ov);
+}
+
+fn copy_master_cell(alloc: Allocator, db: *Db, cell: pg.TableLeafCell) ![]u8 {
+    const ov: ?u32 = if (cell.first_overflow) |p| @intCast(p) else null;
+    return try ep.encode_table_leaf_cell(
+        alloc,
+        db.header,
+        @intCast(cell.row_id),
+        cell.payload,
+        ov,
+    );
 }
 
 const t = std.testing;
 const pgm = @import("pager_manager.zig");
 const Scanner = @import("scanner.zig");
 const PageBuilder = @import("testing/page_builder.zig").PageBuilder;
+
+fn masterRowFields(table_name: []const u8, rootpage: i32, sql: []const u8) [5]ep.RecordFieldEntry {
+    return .{
+        .{ .String = "table" },
+        .{ .String = table_name },
+        .{ .String = table_name },
+        .{ .I32 = rootpage },
+        .{ .String = sql },
+    };
+}
+
+fn bootstrapFileWithMasterAndTablePage(
+    alloc: Allocator,
+    db_header: pg.DbHeader,
+    table_name: []const u8,
+    table_page: []const u8,
+) ![]u8 {
+    var master = try PageBuilder.init(alloc, .Leaf, db_header);
+    defer master.deinit();
+
+    const sql = try std.fmt.allocPrint(alloc, "CREATE TABLE {s} (id INTEGER)", .{table_name});
+    defer alloc.free(sql);
+
+    const fields = masterRowFields(table_name, 2, sql);
+    try master.addLeafCell(1, &fields);
+
+    const page1 = try master.buildPageFile(1);
+    defer alloc.free(page1);
+
+    const page_size = db_header.page_size;
+    const out = try alloc.alloc(u8, page_size * 2);
+    @memcpy(out[0..page_size], page1);
+    @memcpy(out[page_size..page_size + table_page.len], table_page);
+    std.mem.writeInt(u32, out[cnst.HEADER_DATABASE_SIZE_OFFSET..][0..4], 2, .big);
+    return out;
+}
+
+fn rootpageInSqliteMaster(db: *Db, table_name: []const u8) !?i64 {
+    var scn = try db.scanner(db.alloc, 1);
+    defer scn.page_stack.deinit(db.alloc);
+    while (try scn.next_record()) |rec| {
+        var cur = rec;
+        defer cur.deinit();
+        const name = try master_row_name(&cur);
+        if (name == null or !std.mem.eql(u8, name.?, table_name)) continue;
+        const rp = try cur.field(3) orelse return null;
+        return switch (rp) {
+            .Int => |n| n,
+            else => null,
+        };
+    }
+    return null;
+}
 
 fn write_interior_tree_fixture(alloc: Allocator, pm: *pgm, db_header: pg.DbHeader) !void {
     var leaf3 = try PageBuilder.init(alloc, .Leaf, db_header);
@@ -603,7 +820,10 @@ test "insert splits full leaf root into interior btree" {
     }
     try t.expect(packed_rowid > 1);
 
-    const file_image = try builder.buildPageFile(2);
+    const table_page = try builder.build();
+    defer alloc.free(table_page);
+
+    const file_image = try bootstrapFileWithMasterAndTablePage(alloc, db_header, "t", table_page);
     defer alloc.free(file_image);
 
     var file = try tmp.dir.createFile(t.io, "split-leaf.db", .{ .read = true });
@@ -637,7 +857,9 @@ test "insert splits full leaf root into interior btree" {
 
     try t.expectEqual(@as(usize, 1), try execute_insert(alloc, &db, op));
 
-    const root_page = try pm.read_page(tables[0].table_root_page);
+    const new_root = tables[0].table_root_page;
+
+    const root_page = try pm.read_page(new_root);
     try t.expect(root_page.* == .Interior);
     try t.expectEqual(@as(usize, 1), root_page.Interior.cells.items.len);
 
@@ -651,9 +873,20 @@ test "insert splits full leaf root into interior btree" {
     const total_cells = left_page.Leaf.cells.items.len + right_page.Leaf.cells.items.len;
     try t.expectEqual(@as(usize, @intCast(insert_rowid)), total_cells);
 
-    var scanner = try Scanner.new(&pm, alloc, tables[0].table_root_page);
+    var scanner = try Scanner.new(&pm, alloc, new_root);
     defer scanner.page_stack.deinit(alloc);
     try t.expectEqual(@as(u64, insert_rowid + 1), try scanner.max_rowid());
+
+    var pm2 = try pgm.new(alloc, t.io, file);
+    defer pm2.deinit();
+
+    var db2 = Db{
+        .header = db_header,
+        .pager = pm2,
+        .tables_metadata = &.{},
+        .alloc = alloc,
+    };
+    try t.expectEqual(@as(i64, @intCast(new_root)), (try rootpageInSqliteMaster(&db2, "t")).?);
 }
 
 test "insert splits rightmost leaf under interior root" {
@@ -758,4 +991,109 @@ test "insert splits rightmost leaf under interior root" {
     }
     // left leaf (2 rows) + packed right rows + inserted row
     try t.expectEqual(@as(usize, 2 + (packed_rowid - 10) + 1), count);
+}
+
+test "update_table_rootpage_in_master rewrites rootpage on page 1" {
+    var scratch: [65536]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&scratch);
+    const alloc = fba.allocator();
+
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const db_header = pg.DbHeader{
+        .page_size = 512,
+        .page_reserved_size = 0,
+    };
+
+    var table = try PageBuilder.init(alloc, .Leaf, db_header);
+    defer table.deinit();
+    try table.addLeafCell(1, &.{.{ .I32 = 1 }});
+    const table_page = try table.build();
+    defer alloc.free(table_page);
+
+    const file_image = try bootstrapFileWithMasterAndTablePage(alloc, db_header, "t", table_page);
+    defer alloc.free(file_image);
+
+    var file = try tmp.dir.createFile(t.io, "master-update.db", .{ .read = true });
+    defer file.close(t.io);
+
+    var writer_buf: [256]u8 = undefined;
+    var file_writer = file.writer(t.io, &writer_buf);
+    try file_writer.interface.writeAll(file_image);
+
+    var pm = try pgm.new(alloc, t.io, file);
+    defer pm.deinit();
+
+    var db = Db{
+        .header = db_header,
+        .pager = pm,
+        .tables_metadata = &.{},
+        .alloc = alloc,
+    };
+
+    try t.expectEqual(@as(i64, 2), (try rootpageInSqliteMaster(&db, "t")).?);
+
+    _ = try db.pager.read_page(1);
+    const header_before = db.pager.bufs.get(1).?[0..cnst.HEADER_SIZE].*;
+
+    try update_table_rootpage_in_master(&db, "t", 99);
+    try t.expect(db.pager.dirty.contains(1));
+    try db.pager.flush();
+
+    try t.expectEqual(@as(i64, 99), (try rootpageInSqliteMaster(&db, "t")).?);
+    try t.expectEqualSlices(u8, &header_before, db.pager.bufs.get(1).?[0..cnst.HEADER_SIZE]);
+
+    var pm2 = try pgm.new(alloc, t.io, file);
+    defer pm2.deinit();
+
+    var db2 = Db{
+        .header = db_header,
+        .pager = pm2,
+        .tables_metadata = &.{},
+        .alloc = alloc,
+    };
+    try t.expectEqual(@as(i64, 99), (try rootpageInSqliteMaster(&db2, "t")).?);
+}
+
+test "update_table_rootpage_in_master returns TableNotFound for unknown table" {
+    var scratch: [65536]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&scratch);
+    const alloc = fba.allocator();
+
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const db_header = pg.DbHeader{
+        .page_size = 512,
+        .page_reserved_size = 0,
+    };
+
+    var table = try PageBuilder.init(alloc, .Leaf, db_header);
+    defer table.deinit();
+    try table.addLeafCell(1, &.{.{ .I32 = 1 }});
+    const table_page = try table.build();
+    defer alloc.free(table_page);
+
+    const file_image = try bootstrapFileWithMasterAndTablePage(alloc, db_header, "t", table_page);
+    defer alloc.free(file_image);
+
+    var file = try tmp.dir.createFile(t.io, "master-missing.db", .{ .read = true });
+    defer file.close(t.io);
+
+    var writer_buf: [256]u8 = undefined;
+    var file_writer = file.writer(t.io, &writer_buf);
+    try file_writer.interface.writeAll(file_image);
+
+    var pm = try pgm.new(alloc, t.io, file);
+    defer pm.deinit();
+
+    var db = Db{
+        .header = db_header,
+        .pager = pm,
+        .tables_metadata = &.{},
+        .alloc = alloc,
+    };
+
+    try t.expectError(error.TableNotFound, update_table_rootpage_in_master(&db, "missing", 5));
 }

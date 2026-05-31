@@ -456,7 +456,7 @@ When `encode_table_leaf_cell` would set overflow pointer, payload does not fit l
 
 ---
 
-### Phase 8: B-tree growth (stretch)
+### [done] Phase 8: B-tree growth (stretch)
 
 **Current behavior:** `insert.zig` → `load_target_leaf` accepts only a **single leaf root** with no `rightmost_pointer` (no leaf chain). Interior roots and multi-leaf chains return `error.UnsupportedInsert`. `PageFull` from `encode_leaf_page` is returned but not recovered via split.
 
@@ -486,7 +486,7 @@ Extract `TargetLeaf { page_num, leaf }` from the terminal leaf page.
 
 **Dependencies:** Phase 5, existing scanner descent logic
 
-#### Step 8.2: Page split
+#### [done] Step 8.2: Page split
 
 When `encode_leaf_page` → `PageTooSmall` / `PageFull`:
 
@@ -501,7 +501,7 @@ When `encode_leaf_page` → `PageTooSmall` / `PageFull`:
 
 **Dependencies:** Step 8.0, Step 8.1, Phase 6
 
-#### Step 8.3: Update `sqlite_master` root page
+#### [done] Step 8.3: Update `sqlite_master` root page
 
 When Step 8.2b changes the table root page number:
 
