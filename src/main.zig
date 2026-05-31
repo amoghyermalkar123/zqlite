@@ -7,6 +7,7 @@ const db = @import("db.zig");
 const sql = @import("parser/parser.zig");
 const op = @import("operator.zig");
 const engine = @import("planner.zig");
+const insert = @import("insert.zig");
 
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
@@ -53,7 +54,9 @@ fn cli(io: Io, alloc: Allocator, dba: *db) !void {
         } else if (std.mem.eql(u8, input, ".tables")) {
             try display_tables(dba);
         } else {
-            try eval_query(dba, input, alloc);
+            eval_query(dba, input, alloc) catch |err| {
+                std.debug.print("error: {s}\n", .{@errorName(err)});
+            };
             try stdout.flush();
         }
     }
@@ -61,29 +64,38 @@ fn cli(io: Io, alloc: Allocator, dba: *db) !void {
 
 fn display_tables(dba: *db) !void {
     for (dba.tables_metadata) |tb| {
-        std.debug.print("field: {s}\n", .{tb.name});
+        std.debug.print("table: {s}\n", .{tb.name});
     }
 }
 
+// TODO: Query evaluation should be it's own file/ module
 fn eval_query(dba: *db, query: []const u8, alloc: Allocator) !void {
     var parsed_query = try sql.parse_statement(query, alloc, false);
     defer parsed_query.deinit();
 
     var en = engine.Planner.new(dba, alloc);
     var oper = try en.compile(parsed_query.statement);
-    defer oper.deinit();
+    defer oper.deinit(alloc);
 
-    while (try oper.next_row()) |row| {
-        for (row, 0..) |ov, i| {
-            if (i > 0) std.debug.print(" | ", .{});
-            switch (ov.value) {
-                .Null => std.debug.print("NULL", .{}),
-                .Int => |n| std.debug.print("{d}", .{n}),
-                .Float => |f| std.debug.print("{d}", .{f}),
-                .String => |s| std.debug.print("{s}", .{s.str}),
-                .Blob => |b| std.debug.print("<blob:{d}>", .{b.str.len}),
+    switch (oper) {
+        .Select => |*scan| {
+            while (try scan.next_row()) |row| {
+                for (row, 0..) |ov, i| {
+                    if (i > 0) std.debug.print(" | ", .{});
+                    switch (ov.value) {
+                        .Null => std.debug.print("NULL", .{}),
+                        .Int => |n| std.debug.print("{d}", .{n}),
+                        .Float => |f| std.debug.print("{d}", .{f}),
+                        .String => |s| std.debug.print("{s}", .{s.str}),
+                        .Blob => |b| std.debug.print("<blob:{d}>", .{b.str.len}),
+                    }
+                }
+                std.debug.print("\n", .{});
             }
-        }
-        std.debug.print("\n", .{});
+        },
+        .Insert => |*insop| {
+            const n = try insert.execute_insert(alloc, dba, insop.*);
+            std.debug.print("INSERT OK ({d} row{s})\n", .{ n, if (n == 1) "" else "s" });
+        },
     }
 }

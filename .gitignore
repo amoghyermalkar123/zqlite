@@ -4,3 +4,4 @@ res
 dailylogs
 .claude
 *.db
+.cursor

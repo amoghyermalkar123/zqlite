@@ -17,3 +17,5 @@ pub const PAGE_CELL_CONTENT_OFFSET: usize = 5;
 pub const PAGE_FRAGMENTED_BYTES_COUNT_OFFSET: usize = 7;
 pub const RIGHTMOST_POINTER_OFFSET: usize = 8;
 pub const HEADER_PAGE_RESERVED_SIZE_OFFSET = 20;
+/// u32 BE, "database size in pages"
+pub const HEADER_DATABASE_SIZE_OFFSET: usize = 28;

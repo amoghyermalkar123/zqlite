@@ -4,7 +4,7 @@
 const std = @import("std");
 const cnst = @import("constants.zig");
 const Allocator = std.mem.Allocator;
-const Decoder = @import("decode_page.zig").Decoder;
+pub const Decoder = @import("decode_page.zig").Decoder;
 
 pub const OverflowPage = struct {
     next: ?usize,

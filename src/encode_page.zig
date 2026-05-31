@@ -45,7 +45,10 @@ pub fn payloadSizeFor(entry: RecordFieldEntry) usize {
     return size;
 }
 
-// cotrm
+/// encodes an entire record for a leaf cell given the provided `fields`
+/// this involves encoding the overflow bytes as well. It is the caller's responsibility
+/// to properly slice the overflow bytes and store them in the overflow pages
+/// caller owns the returned memory
 pub fn encode_record(alloc: Allocator, fields: []const RecordFieldEntry) ![]u8 {
     var sum_of_serial_types_for_all_fields: usize = 0;
     var sum_of_payload: usize = 0;
@@ -129,6 +132,34 @@ pub fn encode_record(alloc: Allocator, fields: []const RecordFieldEntry) ![]u8 {
     return record_buffer.toOwnedSlice(alloc);
 }
 
+/// just a helper to reduce boilerplate to get local and overflow size
+pub fn table_leaf_payload_layout(db_header: page.DbHeader, payload_len: usize) !struct { local: usize, overflow_bytes: ?usize } {
+    const hd = page.PageHeader{
+        .page_type = .Leaf,
+        .first_free_block = 0,
+        .cell_count = 0,
+        .cell_content_offset = 0,
+        .fragmented_byts_count = 0,
+    };
+    const pair = try hd.local_and_overflow_size(db_header, payload_len);
+    return .{ .local = pair[0], .overflow_bytes = pair[1] };
+}
+
+pub fn encode_overflow_page(alloc: Allocator, db_header: page.DbHeader, next_page: ?u32, chunk: []const u8) ![]u8 {
+    const page_size: usize = @intCast(db_header.page_size);
+    const max_chunk = db_header.usable_page_size() - 4;
+    if (chunk.len > max_chunk) return error.OverflowChunkTooLarge;
+
+    const buf = try alloc.alloc(u8, page_size);
+    errdefer alloc.free(buf);
+    @memset(buf, 0);
+
+    const next_raw: u32 = next_page orelse 0;
+    std.mem.writeInt(u32, buf[0..4], next_raw, .big);
+    @memcpy(buf[4 .. 4 + chunk.len], chunk);
+    return buf;
+}
+
 /// [payload_size varint][rowid varint][local payload bytes][overflow ptr?]
 /// Copies record_payload internally and owns it
 pub fn encode_table_leaf_cell(alloc: Allocator, db_header: page.DbHeader, rowid: u64, record_payload: []const u8, first_ov_page: ?u32) ![]u8 {
@@ -175,6 +206,8 @@ pub fn encode_table_interior_cell(alloc: Allocator, left_child_page: u32, key: u
     return interior_cell.toOwnedSlice(alloc);
 }
 
+/// caller must free cells
+/// encode_leaf_page consumes cells
 pub fn encode_leaf_page(alloc: Allocator, db_header: page.DbHeader, cells: []const []const u8) ![]u8 {
     const page_size: usize = db_header.page_size;
     const header_size = cnst.PAGE_LEAF_HEADER_SIZE;
@@ -195,6 +228,44 @@ pub fn encode_leaf_page(alloc: Allocator, db_header: page.DbHeader, cells: []con
     std.mem.writeInt(u16, buf[cnst.PAGE_FIRST_FREEBLOCK_OFFSET..][0..2], 0, .big);
     std.mem.writeInt(u16, buf[cnst.PAGE_CELL_COUNT_OFFSET..][0..2], @intCast(cells.len), .big);
     buf[cnst.PAGE_FRAGMENTED_BYTES_COUNT_OFFSET] = 0;
+
+    // write backwards because after cell pointers we store free space
+    var content_cursor: usize = page_size;
+    for (cells, 0..) |cell, i| {
+        content_cursor -= cell.len;
+        @memcpy(buf[content_cursor .. content_cursor + cell.len], cell);
+
+        const ptr_offset = header_size + i * 2;
+        std.mem.writeInt(u16, buf[ptr_offset..][0..2], @intCast(content_cursor), .big);
+    }
+
+    const content_offset: u16 = if (content_cursor == cnst.PAGE_MAX_SIZE) 0 else @intCast(content_cursor);
+    std.mem.writeInt(u16, buf[cnst.PAGE_CELL_CONTENT_OFFSET..][0..2], content_offset, .big);
+
+    return buf;
+}
+
+pub fn encode_interior_page(alloc: Allocator, db_header: page.DbHeader, cells: []const []const u8, rightmost_pointer: u32) ![]u8 {
+    const page_size: usize = db_header.page_size;
+    const header_size = cnst.PAGE_INTERIOR_HEADER_SIZE;
+    const pointer_bytes = cells.len * 2;
+
+    var total_cell_bytes: usize = 0;
+    for (cells) |cell| total_cell_bytes += cell.len;
+
+    if (header_size + pointer_bytes + total_cell_bytes > page_size) {
+        return error.PageTooSmall;
+    }
+
+    const buf = try alloc.alloc(u8, page_size);
+    errdefer alloc.free(buf);
+    @memset(buf, 0);
+
+    buf[0] = @intFromEnum(page.PageType.Interior);
+    std.mem.writeInt(u16, buf[cnst.PAGE_FIRST_FREEBLOCK_OFFSET..][0..2], 0, .big);
+    std.mem.writeInt(u16, buf[cnst.PAGE_CELL_COUNT_OFFSET..][0..2], @intCast(cells.len), .big);
+    buf[cnst.PAGE_FRAGMENTED_BYTES_COUNT_OFFSET] = 0;
+    std.mem.writeInt(u32, buf[cnst.RIGHTMOST_POINTER_OFFSET..][0..4], rightmost_pointer, .big);
 
     // write backwards because after cell pointers we store free space
     var content_cursor: usize = page_size;
@@ -355,6 +426,53 @@ test "encode table leaf cell errors when overflow pointer is missing" {
     );
 }
 
+test "encode overflow page roundtrip" {
+    const db_header = page.DbHeader{
+        .page_size = 512,
+        .page_reserved_size = 0,
+    };
+
+    const chunk = "overflow-chunk-data";
+    const raw = try encode_overflow_page(t.allocator, db_header, 42, chunk);
+    defer t.allocator.free(raw);
+
+    const parsed = try page.parse_overflow_page(t.allocator, raw);
+    defer t.allocator.free(parsed.payload);
+
+    try t.expectEqual(@as(?usize, 42), parsed.next);
+    try t.expectEqualSlices(u8, chunk, parsed.payload[0..chunk.len]);
+}
+
+test "encode overflow page last page has zero next pointer" {
+    const db_header = page.DbHeader{
+        .page_size = 512,
+        .page_reserved_size = 0,
+    };
+
+    const raw = try encode_overflow_page(t.allocator, db_header, null, "tail");
+    defer t.allocator.free(raw);
+
+    const parsed = try page.parse_overflow_page(t.allocator, raw);
+    defer t.allocator.free(parsed.payload);
+
+    try t.expect(parsed.next == null);
+}
+
+test "encode overflow page rejects oversized chunk" {
+    const db_header = page.DbHeader{
+        .page_size = 512,
+        .page_reserved_size = 0,
+    };
+
+    const oversized = try t.allocator.alloc(u8, db_header.usable_page_size() - 3);
+    defer t.allocator.free(oversized);
+
+    try t.expectError(
+        error.OverflowChunkTooLarge,
+        encode_overflow_page(t.allocator, db_header, null, oversized),
+    );
+}
+
 test "encode table leaf cell errors when overflow pointer is unexpected" {
     const db_header = page.DbHeader{
         .page_size = 512,
@@ -439,6 +557,58 @@ test "encode leaf page with multiple cells" {
     try t.expectEqualSlices(u8, cell2, page_buf[ptr2 .. ptr2 + cell2.len]);
 }
 
+test "encode interior page roundtrip parse" {
+    const db_header = page.DbHeader{
+        .page_size = 512,
+        .page_reserved_size = 0,
+    };
+
+    const cell0 = try encode_table_interior_cell(t.allocator, 2, 100);
+    defer t.allocator.free(cell0);
+    const cell1 = try encode_table_interior_cell(t.allocator, 5, 300);
+    defer t.allocator.free(cell1);
+
+    const page_buf = try encode_interior_page(t.allocator, db_header, &.{ cell0, cell1 }, 0x00010203);
+    defer t.allocator.free(page_buf);
+
+    var parsed = try page.parse_page(t.allocator, page_buf, 2, &db_header);
+    defer page.deinitPage(t.allocator, &parsed);
+
+    try t.expectEqual(page.PageType.Interior, parsed.Interior.header.page_type);
+    try t.expectEqual(@as(?u32, 0x00010203), parsed.Interior.header.rightmost_pointer);
+    try t.expectEqual(@as(usize, 2), parsed.Interior.cells.items.len);
+    try t.expectEqual(@as(u32, 2), parsed.Interior.cells.items[0].left_child_page);
+    try t.expectEqual(@as(i64, 100), parsed.Interior.cells.items[0].key);
+    try t.expectEqual(@as(u32, 5), parsed.Interior.cells.items[1].left_child_page);
+    try t.expectEqual(@as(i64, 300), parsed.Interior.cells.items[1].key);
+}
+
+test "encode interior page matches PageBuilder" {
+    const db_header = page.DbHeader{
+        .page_size = 512,
+        .page_reserved_size = 0,
+    };
+
+    var builder = try PageBuilder.init(t.allocator, .Interior, db_header);
+    defer builder.deinit();
+    builder.setRightmostPointer(0x00010203);
+    try builder.addInteriorCell(2, 100);
+    try builder.addInteriorCell(5, 300);
+
+    const expected = try builder.build();
+    defer t.allocator.free(expected);
+
+    const cell0 = try encode_table_interior_cell(t.allocator, 2, 100);
+    defer t.allocator.free(cell0);
+    const cell1 = try encode_table_interior_cell(t.allocator, 5, 300);
+    defer t.allocator.free(cell1);
+
+    const page_buf = try encode_interior_page(t.allocator, db_header, &.{ cell0, cell1 }, 0x00010203);
+    defer t.allocator.free(page_buf);
+
+    try t.expectEqualSlices(u8, expected, page_buf);
+}
+
 test "encode leaf page roundtrip parse" {
     const db_header = page.DbHeader{
         .page_size = 512,
@@ -466,7 +636,7 @@ test "encode leaf page roundtrip parse" {
 
 const tw = @import("tripwire").module(enum {
     after_record_buffer_alloc,
-}, @TypeOf(encode_record));
+}, error{OutOfMemory});
 
 fn encode_record_tripwire_impl(alloc: Allocator) !void {
     errdefer tw.reset();

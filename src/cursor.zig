@@ -98,28 +98,28 @@ pub const Cursor = struct {
         const record_field = self.record_header.fields[n];
         try self.ensurePayloadLoaded(record_field.end_offset());
 
-        var decoder = pg.Decoder{ .buffer = self.cell_payload.items };
+        var decoder = pg.Decoder.initAt(self.cell_payload.items, record_field.offset);
 
         switch (record_field.field_type) {
             .Null => return .Null,
-            .I8 => return .{ .Int = try decoder.read_int(record_field.offset, i8) },
-            .I16 => return .{ .Int = try decoder.read_int(record_field.offset, i16) },
-            .I24 => return .{ .Int = try decoder.read_int(record_field.offset, i24) },
-            .I32 => return .{ .Int = try decoder.read_int(record_field.offset, i32) },
-            .I48 => return .{ .Int = try decoder.read_int(record_field.offset, i48) },
-            .I64 => return .{ .Int = try decoder.read_int(record_field.offset, i64) },
-            .Float => return .{ .Float = @bitCast(try decoder.read_int(record_field.offset, u64)) },
+            .I8 => return .{ .Int = try decoder.readInt(i8) },
+            .I16 => return .{ .Int = try decoder.readInt(i16) },
+            .I24 => return .{ .Int = try decoder.readInt(i32) },
+            .I32 => return .{ .Int = try decoder.readInt(i32) },
+            .I48 => return .{ .Int = try decoder.readInt(i64) },
+            .I64 => return .{ .Int = try decoder.readInt(i64) },
+            .Float => return .{ .Float = @bitCast(try decoder.readInt(u64)) },
             .String => |length| {
                 return .{
                     .String = .{
-                        .str = try decoder.read_slice(record_field.offset, length),
+                        .str = try decoder.readSlice(length),
                     },
                 };
             },
             .Blob => |length| {
                 return .{
                     .Blob = .{
-                        .str = try decoder.read_slice(record_field.offset, length),
+                        .str = try decoder.readSlice(length),
                     },
                 };
             },

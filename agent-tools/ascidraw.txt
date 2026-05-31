@@ -1,0 +1,509 @@
+# ascidraw — complete LLM reference (v1.0)
+
+================================================================================
+1. WHAT ASCIDRAW IS
+================================================================================
+
+ascidraw is a command-line tool that turns a line-oriented DSL into plain ASCII
+diagrams on stdout. Designed for LLMs: one statement per line, minimal syntax, no
+manual coordinates.
+
+Document properties:
+  Encoding:        UTF-8
+  Line endings:    \n (Unix)
+  File extension:  .asc (convention)
+  Output:          plain ASCII on stdout (no ANSI by default)
+
+Processing pipeline:
+  source (.asc) → parse → validate → layout → render → stdout
+
+Supported elements (v1.0):
+  box          bordered rectangle with text (functions, steps, records)
+  bar          one bordered row with vertical interior segments (layouts, memory maps)
+  arrow, link  directed edges between nodes
+
+Reserved — do NOT emit (not in v1.0; parsers should reject or ignore):
+  group <id>: child1 child2 ...
+  grid cols: <n>
+  branch / conditional nodes
+  manual position at <x> <y>
+
+Also unsupported:
+  colors, ANSI, SVG, PNG export, Mermaid-style shapes, subgraphs, diamonds, circles
+
+Build (when working inside the ascidraw repository):
+  go build -o ascidraw ./cmd/ascidraw
+  go run ./cmd/ascidraw ...
+  go test ./...
+
+================================================================================
+2. QUICK START
+================================================================================
+
+Workflow:
+  1. Write source (sections 4–6 below).
+  2. ascidraw check -e '<source>'   or   ascidraw check file.asc
+  3. ascidraw -e '<source>'         or   ascidraw file.asc
+  4. Put stdout ASCII in a plain code fence for the user.
+
+Vertical call stack template:
+  flow down
+  box <id1>: <label1>
+  box <id2>: <label2>
+  arrow <id1> -> <id2>
+
+Horizontal pipeline template:
+  flow right
+  box a: step one
+  box b: step two
+  arrow a -> b
+
+Rules of thumb:
+  - flow down  → call stacks, top-to-bottom
+  - flow right → pipelines, left-to-right
+  - bar        → byte/layout strips
+  - box        → functions, concepts, record fields
+  - ids: short letters (a, b, main, hdr), not bare numbers
+  - one statement per line
+  - run check before showing rendered output
+
+================================================================================
+3. CLI REFERENCE
+================================================================================
+
+COMMANDS
+
+  ascidraw [file.asc]
+  ascidraw -e '<source>'
+      Parse → validate → layout → render → stdout (default command).
+
+  ascidraw check [file.asc]
+  ascidraw check -e '<source>'
+      Validate only; no render.
+
+  ascidraw ast [file.asc]
+  ascidraw ast -e '<source>'
+      Print JSON AST after successful parse/validate.
+
+FLAGS (default render command only)
+
+  --no-implicit     disable automatic node chaining (section 7)
+  --width N         override width directive (positive int)
+  --pad N           override pad directive (positive int)
+
+EXIT CODES
+
+  0  success
+  1  parse or validation error (stderr)
+  2  I/O error (missing/unreadable file)
+
+ERROR FORMAT
+
+  <path>:<line>:<col>: <CODE>: <message>
+  Column omitted when unknown: <path>:<line>: <CODE>: <message>
+
+INLINE SOURCE
+
+  Use -e with quoted source; embedded newlines are real line breaks.
+
+================================================================================
+4. LANGUAGE SPECIFICATION (v1.0)
+================================================================================
+
+4.1 LEXICAL RULES
+-----------------
+
+  Blank lines: ignored.
+
+  Comments: first non-whitespace character on a line is # → rest of line ignored.
+
+  Whitespace: leading/trailing trimmed on directive and statement lines.
+
+  Multiline box blocks: inner line content preserved; trailing space per inner line
+  may be trimmed by the tool.
+
+  Identifiers:
+    id = [_a-zA-Z] ( [_a-zA-Z0-9.-]* )
+    Examples: main, parse_page, box.1, hdr
+
+  Labels: unquoted text after first : on box lines; bar segment text between | chars.
+
+4.2 DOCUMENT HEADER (optional)
+------------------------------
+
+  dsl 1.0
+
+  Declares dialect version. Any non-empty token sequence after "dsl " is accepted
+  (e.g. dsl 1.0). Default if omitted: 1.0.
+
+4.3 DIRECTIVES (each at most once)
+----------------------------------
+
+  flow down | flow right       default: flow down
+  width <positive-int>         default: 40
+  pad <positive-int>           default: 1
+  gutter <positive-int>        default: 3
+  align center | align left    default: align center (only when flow down)
+
+  width: max inner content width for boxes (wrap width); for bars, target total
+         content width across segments (excluding borders and interior separators).
+  pad:   spaces between border and inner text.
+  gutter: minimum gap between nodes (used for placement and arrow routing).
+  align: cross-axis placement when flow down (left flush vs centered in column).
+
+4.4 BOX
+-------
+
+  Single line:
+    box <id>: <label>
+
+  Multiline (closing | alone on its own line; optional whitespace around |):
+    box <id>: |
+      line one
+      line two
+    |
+
+  Sugar (equivalent to box box.<id>: <label>):
+    box.<id>: <label>
+    Example: box.a: text0  ==  box box.a: text0
+
+  Label must not be empty on single-line boxes.
+  Node ids unique across all box and bar nodes.
+
+4.5 BAR
+-------
+
+  bar <id>: <segment-1> | <segment-2> | ...
+
+  Segment forms:
+    <label>                 weight = max(1, display_width(label))
+    <positive-int>:<label>  fixed proportional weight
+    *:<label>               flex segment
+
+  At least one non-empty segment required after splitting on |.
+  Interior | separator columns run full inner height of the bar.
+  Same outer border style as boxes (+ - | corners and edges).
+
+4.6 ARROW (canonical)
+---------------------
+
+  arrow <from> -> <to>
+  arrow <from> -> <to>: <label>
+  arrow <from> -> <to> <side>
+  arrow <from> -> <to>: <label> <side>
+
+  <from> <to>: existing node ids.
+  <side>: down | right | left | up (optional)
+
+  SIDE PARSING RULE:
+    If the statement's last space-delimited token is exactly down, right, left, or up,
+    it is <side>, NOT part of <label> (with or without ": <label>").
+
+    arrow a -> b: go down    → label "go", side down
+    arrow a -> b: calls       → label "calls"
+    arrow a -> b right        → side right, no label
+
+  Default side when omitted: down (flow down), right (flow right).
+
+4.7 LINK (shorthand)
+--------------------
+
+  link <from> <to>
+  link <from> <to>: <label>
+
+  Equivalent to arrow <from> -> <to> with optional label.
+  No side hint on link in v1.0.
+
+================================================================================
+5. IMPLICIT EDGES
+================================================================================
+
+When ALL of the following hold:
+  - document has ZERO arrow statements AND ZERO link statements
+  - document has TWO OR MORE nodes
+
+Then automatically add edges in declaration order:
+  node[0] -> node[1] -> node[2] -> ...
+
+If ANY explicit arrow or link exists, NO implicit edges are added (you must wire all
+edges yourself).
+
+CLI: --no-implicit disables chaining even when there are no explicit edges.
+
+Use --no-implicit for stacked bars or unrelated nodes that must not be connected.
+
+================================================================================
+6. VALIDATION
+================================================================================
+
+Run: ascidraw check
+
+Rules enforced:
+  - unique node ids (box and bar share one namespace)
+  - edge endpoints reference existing ids
+  - no self-loops (arrow a -> a)
+  - each directive at most once
+  - width, pad, gutter positive integers
+  - align is center or left
+  - bar has >= 1 segment; bar weights positive int or *
+  - non-empty document (at least one node)
+
+ERROR CODES
+
+  E001  duplicate node id
+  E002  edge references unknown id
+  E003  self-loop arrow
+  E004  duplicate directive
+  E005  empty document (no nodes)
+  E006  bar with zero segments
+  E007  unknown keyword or malformed statement
+  E008  unclosed multiline box | ... | block
+  E010  invalid directive value, side hint, or bar weight
+  E011  arrow routing impossible or blocked by node
+
+Common authoring mistakes:
+  typo in arrow id → E002
+  empty box label (box x:) → E007
+  missing closing | → E008
+  duplicate flow/width → E004
+  width 0 → E010
+
+================================================================================
+7. LAYOUT AND RENDERING (normative v1.0)
+================================================================================
+
+7.1 MEASURE — BOXES
+-------------------
+
+  1. Wrap text to width using display width (Unicode-aware).
+  2. Outer size = inner text area + 2*pad + 2 border columns/rows.
+
+7.2 MEASURE — BARS
+------------------
+
+  1. width = target total content width across segments (excl. borders and
+     interior separator columns).
+  2. n segments → effective content width = max(width, n).
+  3. n segments → n-1 interior | separator columns (not counted in content width).
+  4. Per segment share:
+       explicit weight w → share w
+       omitted weight → share max(1, display_width(label))
+       * → flex segment
+  5. Every segment gets at least 1 content column.
+  6. No flex: distribute effective width proportionally by share; round nearest;
+     adjust columns right-to-left until sum matches exactly.
+  7. With flex: reserve 1 column per flex segment; distribute remainder among
+     non-flex by rule 6; give leftover columns to flex segments left-to-right.
+  8. Wrap each segment label within its column width.
+
+7.3 PLACE
+---------
+
+  flow down:
+    - stack vertically with gutter between nodes
+    - column width = widest node outer width
+    - align left: all nodes flush to column left edge
+    - align center: each node centered in column
+
+  flow right:
+    - single horizontal row, gutter between nodes
+    - align directive has no effect
+
+  Manual x,y positions are NOT in v1.0.
+
+7.4 ARROWS
+----------
+
+  - Orthogonal routing, at most one bend (L-shape) in v1.0.
+  - Adjacent nodes on primary flow axis: straight connector unless side hint
+    requires otherwise. Adjacent means consecutive in declaration order on that axis.
+  - flow down default: exit bottom-center of from, enter top-center of to, head v.
+  - flow right default: exit right-center of from, enter left-center of to, head >.
+  - Non-default side: single-bend path; first segment follows hinted exit side when
+    possible; if impossible without crossing node borders/text → E011.
+  - Arrows may cross other arrows; must NOT overwrite box/bar borders or node text.
+  - Characters: + - | for borders; | - for shafts; v > < ^ for heads.
+  - Label on first horizontal segment of route; if route fully vertical, label one
+    row above arrow head, left-aligned to shaft.
+
+================================================================================
+8. JSON AST (ascidraw ast)
+================================================================================
+
+Debugging/tooling only.
+
+{
+  "dsl_version": "1.0",
+  "config": {
+    "flow": "down",
+    "width": 40,
+    "pad": 1,
+    "gutter": 3,
+    "align": "center"
+  },
+  "nodes": [
+    { "id": "main", "kind": "box", "lines": ["main()"] },
+    { "id": "page1", "kind": "bar", "segments": [
+        { "label": "DbHeader", "weight": 100 },
+        { "label": "B-tree page", "flex": true }
+    ]}
+  ],
+  "edges": [
+    { "from": "main", "to": "parse", "label": "" }
+  ]
+}
+
+edges in JSON are EXPLICIT only; implicit chains are added at render time.
+
+================================================================================
+9. EXAMPLES (copy-paste ready)
+================================================================================
+
+9.1 Function call chain
+-----------------------
+flow down
+box main: main()
+box parse: parse_page()
+box read: readInt()
+arrow main -> parse
+arrow parse -> read
+
+9.2 Horizontal pipeline
+-----------------------
+flow right
+box a: text0
+box b: text1
+arrow a -> b
+
+9.3 Implicit chain (omit all arrow/link lines)
+----------------------------------------------
+flow down
+box step1: open()
+box step2: read()
+box step3: close()
+
+9.4 Stacked bars (no connecting arrow)
+--------------------------------------
+flow down
+width 72
+bar page1: 100:DbHeader | *:B-tree page
+bar leaf: type | free | cnt | off | frg | ptrs | free | cells
+
+Run: ascidraw --no-implicit file.asc
+
+9.5 Multiline record
+--------------------
+flow down
+box hdr: |
+  header_size (varint)
+  type codes...
+|
+box payload: field data...
+arrow hdr -> payload: then
+
+9.6 Box sugar
+-------------
+flow right
+box.a: input
+box.b: output
+arrow box.a -> box.b
+
+9.7 Weighted bar
+--------------
+flow down
+width 60
+bar mem: 8:vec3 | 4:rgb | *:padding | 4:flags
+
+9.8 Link shorthand
+------------------
+box src: source()
+box dst: sink()
+link src dst: passes data
+
+9.9 Side hint
+-------------
+flow down
+box a: handler()
+box b: worker()
+arrow a -> b: async down
+
+9.10 Comments and directives
+-----------------------------
+# request flow
+dsl 1.0
+flow down
+width 48
+gutter 4
+align left
+box api: GET /items
+box db: SELECT *
+
+================================================================================
+10. LLM AUTHORING — DO AND DON'T
+================================================================================
+
+DO:
+  - Output ascidraw source when asked for diagrams (and rendered ASCII after check).
+  - Use explicit arrows when the graph is not a simple declaration-order chain.
+  - Use --no-implicit when nodes must stay disconnected.
+  - Match every arrow/link endpoint to a box or bar id.
+  - Prefer check before paste of rendered art.
+
+DON'T:
+  - Don't use Mermaid/PlantUML/hand-drawn ASCII when ascidraw is requested.
+  - Don't invent syntax (group, grid, colors, coordinates).
+  - Don't use ids 1, 2 alone — use a, b, step1.
+  - Don't write arrow a -> b: go down unless you want side=down and label "go".
+  - Don't add one arrow and expect other pairs to auto-connect — any arrow disables
+    ALL implicit edges.
+  - Don't promise PNG/SVG from ascidraw (ASCII only).
+
+================================================================================
+11. AGENT INTEGRATION
+================================================================================
+
+Source only — fence as ```asc or ```text:
+  flow down
+  box a: foo()
+  box b: bar()
+  arrow a -> b
+
+Render when shell available:
+  ascidraw check -e '...' && ascidraw -e '...'
+
+File workflow:
+  write diagram.asc → ascidraw check diagram.asc → ascidraw diagram.asc
+
+Narrow output:
+  ascidraw --width 32 -e '...'
+
+System prompt snippet:
+  Use ascidraw for ASCII diagrams. Syntax: box, bar, arrow, link, directives.
+  One statement per line. Run ascidraw check then ascidraw. Full rules in llms.txt.
+
+================================================================================
+12. TROUBLESHOOTING
+================================================================================
+
+Unexpected arrow between bars
+  → use --no-implicit
+
+Diagram too wide
+  → lower width directive or --width 32; shorten labels
+
+check OK but render fails E011
+  → arrow path blocked by nodes; reorder nodes or simplify edges
+
+unknown or unsupported statement
+  → typo; bad box line; missing : on box.a: label
+
+Duplicate node id
+  → box and bar ids share one namespace
+
+Bar label wraps one char per line
+  → flex segment too narrow; increase width or shorten label
+
+Multiline box fails
+  → closing | must be alone on a line; opener ends with : |
+
+End of llms.txt — single source of truth for ascidraw usage.
